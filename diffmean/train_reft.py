@@ -230,6 +230,9 @@ def train(in_path: Path, out_dir: Path, model_name: str,
         model_name, torch_dtype=torch_dtype, device_map=device,
     )
     model.eval()
+    # Gradient checkpointing recomputes activations on the backward pass instead
+    # of storing them — cuts ~40% of activation memory at ~20% speed cost.
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     for p in model.parameters():
         p.requires_grad_(False)
 
