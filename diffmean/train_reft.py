@@ -178,31 +178,26 @@ class LoReftIntervention(torch.nn.Module):
 # ---------------------------------------------------------------------------
 
 def _register_hooks(model, interventions: dict[int, LoReftIntervention],
-                    positions_fn, ctx_lens: list[int]
                     ) -> list[torch.utils.hooks.RemovableHook]:
     """Register forward hooks on the specified layer outputs.
 
-    Each hook fires after transformer block `L` and edits only the token
-    positions returned by positions_fn(ctx_len) for each sequence in the batch.
+    Applies the intervention to all token positions (equivalent to all_tokens=True).
+    Out-of-place only — no in-place tensor modification, so autograd works cleanly.
+    LoReftIntervention.forward supports arbitrary leading dims [B, T, d_model].
     """
     hooks = []
     for layer_idx, intervention in interventions.items():
         layer = model.model.layers[layer_idx]
 
-        def make_hook(interv, layer_i):
+        def make_hook(interv):
             def hook(module, args, output):
-                # output is typically (hidden_states, ...) or just hidden_states.
                 hs = output[0] if isinstance(output, tuple) else output
-                for b_i, ctx_len in enumerate(ctx_lens[0]):  # closure over mutable list
-                    for pos in positions_fn(ctx_len):
-                        if pos < hs.shape[1]:
-                            hs[b_i, pos, :] = interv(hs[b_i, pos, :])
-                if isinstance(output, tuple):
-                    return (hs,) + output[1:]
-                return hs
+                rest = output[1:] if isinstance(output, tuple) else None
+                hs_new = interv(hs)  # [B, T, d_model], fully out-of-place
+                return (hs_new, *rest) if rest is not None else hs_new
             return hook
 
-        hooks.append(layer.register_forward_hook(make_hook(intervention, layer_idx)))
+        hooks.append(layer.register_forward_hook(make_hook(intervention)))
     return hooks
 
 
@@ -263,9 +258,6 @@ def train(in_path: Path, out_dir: Path, model_name: str,
     total_steps = (len(loader) // grad_accum) * epochs
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
-    # Mutable container so hooks can read the current batch's ctx_lens.
-    _ctx_lens_ref: list[list[int]] = [[]]
-
     step = 0
     for epoch in range(epochs):
         total_loss = 0.0
@@ -275,10 +267,9 @@ def train(in_path: Path, out_dir: Path, model_name: str,
         for batch_i, batch in enumerate(loader):
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
-            _ctx_lens_ref[0] = batch["ctx_lens"]
 
             # Register hooks for this forward pass.
-            hooks = _register_hooks(model, interventions, positions_fn, _ctx_lens_ref)
+            hooks = _register_hooks(model, interventions)
             try:
                 out = model(input_ids=input_ids,
                             attention_mask=(input_ids != tokenizer.pad_token_id).long(),
