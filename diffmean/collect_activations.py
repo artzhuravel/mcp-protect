@@ -51,13 +51,25 @@ TERMINATORS = [
     "</s>",
 ]
 
+# Markdown code-fence trailers — Gemma frequently wraps JSON tool calls in
+# ```json ... ``` while Phi/Qwen emit raw dicts. Without stripping these, the
+# "last content token" of a Gemma y_neg is a backtick (a stylistic artifact)
+# while the "last content token" of a Phi y_pos is `}` (semantic content) —
+# creating a cross-model style confound that dominates the DiffMean direction.
+FENCE_TRAILERS = [
+    "```",
+]
+
 
 def _strip_terminators(text: str) -> str:
+    """Trim chat-template terminators and trailing markdown fences so the
+    *last content token* of y_pos and y_neg is comparable across source
+    models. Loops because terminators stack (e.g. ``` followed by <end_of_turn>)."""
     text = text.rstrip()
     changed = True
     while changed:
         changed = False
-        for term in TERMINATORS:
+        for term in TERMINATORS + FENCE_TRAILERS:
             if text.endswith(term):
                 text = text[: -len(term)].rstrip()
                 changed = True
