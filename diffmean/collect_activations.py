@@ -84,23 +84,58 @@ def _build_chat_prompt(tokenizer, system_prompt: str, user_query: str) -> str:
         )
 
 
+def _decision_token_pos(tokenizer, ctx: str, full_text: str) -> int:
+    """Position of the *decision token* in the tokenized full_text.
+
+    For thinking-trace pairs, that's the last token of the response that occurs
+    at-or-before the closing </think> tag — i.e. the moment the model commits
+    to a decision but hasn't yet emitted the tool call. We locate it by string
+    search on the full text and convert offset → token index.
+
+    Returns -1 (= true last token, the legacy behaviour) when no </think> is
+    found, so this is a no-op for non-thinking inputs.
+    """
+    lower = full_text.lower()
+    end = lower.rfind("</think>")
+    if end < 0:
+        return -1
+    decision_char = end + len("</think>")
+    # Tokenize once with offsets so we can map char-pos → token-pos.
+    enc = tokenizer(full_text, return_offsets_mapping=True,
+                    add_special_tokens=False)
+    offsets = enc["offset_mapping"]
+    for i, (a, b) in enumerate(offsets):
+        if b >= decision_char:
+            return i
+    return -1
+
+
 @torch.no_grad()
-def _last_token_residual(model, tokenizer, full_text: str, layers: list[int],
-                         device: str, max_len: int) -> dict[int, torch.Tensor]:
-    """Forward `full_text` once, return last-token residual at each layer in
-    `layers`. Returns {layer: [d_model] float16 cpu}."""
+def _residual_at(model, tokenizer, full_text: str, layers: list[int],
+                 device: str, max_len: int, ctx: str) -> dict[int, torch.Tensor]:
+    """Forward `full_text` once, return residual at each layer in `layers` at
+    either the last token (default) or at the closing-</think> position when
+    the response contains a thinking trace."""
     enc = tokenizer(full_text, return_tensors="pt", truncation=True,
                     max_length=max_len, add_special_tokens=False)
     input_ids = enc["input_ids"].to(device)
     attn = enc["attention_mask"].to(device)
     out = model(input_ids=input_ids, attention_mask=attn,
                 output_hidden_states=True, use_cache=False)
+    # Pick the position to read activations from.
+    pos = _decision_token_pos(tokenizer, ctx, full_text)
+    if pos < 0 or pos >= input_ids.shape[1]:
+        pos = input_ids.shape[1] - 1
     # hidden_states: tuple of (n_layers+1) tensors [1, T, d_model]
     # index 0 = embedding output; layer L's output = hidden_states[L+1]
     return {
-        L: out.hidden_states[L + 1][0, -1, :].detach().to(torch.float16).cpu()
+        L: out.hidden_states[L + 1][0, pos, :].detach().to(torch.float16).cpu()
         for L in layers
     }
+
+
+# Backwards-compat alias used by older callers.
+_last_token_residual = _residual_at
 
 
 def run(in_path: Path, out_dir: Path, model_name: str, layers: list[int],
@@ -146,10 +181,10 @@ def run(in_path: Path, out_dir: Path, model_name: str, layers: list[int],
 
             try:
                 # One forward per response → dict {layer: [d_model]} for all requested layers.
-                h_pos = _last_token_residual(model, tokenizer, ctx + y_pos,
-                                             layers, device, max_len)
-                h_neg = _last_token_residual(model, tokenizer, ctx + y_neg,
-                                             layers, device, max_len)
+                h_pos = _residual_at(model, tokenizer, ctx + y_pos,
+                                     layers, device, max_len, ctx)
+                h_neg = _residual_at(model, tokenizer, ctx + y_neg,
+                                     layers, device, max_len, ctx)
             except Exception as e:
                 # OOM / tokenization edge cases: skip the row, keep the run going.
                 print(f"  [{i}] skip ({type(e).__name__}: {str(e)[:120]})",
