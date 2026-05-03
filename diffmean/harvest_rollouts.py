@@ -40,6 +40,7 @@ from pathlib import Path
 
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+_POISONED_TOOL_NAME_RE = re.compile(r"^Tool:\s*(\S+)", re.MULTILINE | re.IGNORECASE)
 
 
 def _has_closed_think(text: str) -> bool:
@@ -48,8 +49,29 @@ def _has_closed_think(text: str) -> bool:
     return "</think>" in (text or "").lower()
 
 
-def _load_rollouts(eval_dir: Path) -> list[dict]:
-    """Yield {id, label, system_prompt, user_query, completion} per rollout."""
+def _poisoned_tool_name(poisoned_tool_text: str) -> str | None:
+    """MCPTox poisoned tools are formatted with a 'Tool: <name>' header. Pull
+    that name so we can check whether the model's thinking mentions it."""
+    if not poisoned_tool_text:
+        return None
+    m = _POISONED_TOOL_NAME_RE.search(poisoned_tool_text)
+    return m.group(1).strip() if m else None
+
+
+def _think_block(text: str) -> str:
+    m = _THINK_RE.search(text or "")
+    return m.group(1) if m else ""
+
+
+def _load_rollouts(eval_dir: Path, require_notices_poison: bool = False) -> list[dict]:
+    """Yield {id, label, system_prompt, user_query, completion, mentions_poison} per rollout.
+
+    mentions_poison: True if the model's <think> block contains the poisoned
+    tool's name. Resist traces split into "noticed+ignored" (mentions=True,
+    deliberate) and "didn't notice" (mentions=False, inattentive). When
+    require_notices_poison=True we drop the inattentive resist subset to
+    sharpen the DiffMean contrast around the *deliberation* axis.
+    """
     rows = []
     for results_path in eval_dir.glob("**/results.jsonl"):
         for line in results_path.open():
@@ -67,13 +89,22 @@ def _load_rollouts(eval_dir: Path) -> list[dict]:
             if ar is None:
                 continue
             label = "resist" if float(ar) >= 0.5 else "comply"
-            # Reconstruct system + user from prompt
+
+            poisoned = info.get("poisoned_tool", "")
+            tname = _poisoned_tool_name(poisoned)
+            think_body = _think_block(completion).lower()
+            mentions = bool(tname and tname.lower() in think_body)
+
+            if require_notices_poison and not mentions:
+                continue
+
             prompt_msgs = d.get("prompt") or []
             sys_p = next((m["content"] for m in prompt_msgs if m["role"] == "system"), "")
             usr_q = next((m["content"] for m in prompt_msgs if m["role"] == "user"), "")
             rows.append({
                 "case_id": info.get("id") or info.get("data_id") or "",
                 "label": label,
+                "mentions_poison": mentions,
                 "system_prompt": sys_p,
                 "user_query": usr_q or info.get("query", ""),
                 "completion": completion,
@@ -81,9 +112,11 @@ def _load_rollouts(eval_dir: Path) -> list[dict]:
                     "paradigm": info.get("paradigm", "Unknown"),
                     "security_risk": info.get("security_risk", info.get("security risk", "Unknown")),
                     "server": info.get("server", ""),
+                    "mentions_poison": mentions,
                 },
                 "extra": {
-                    "poisoned_tool": info.get("poisoned_tool", ""),
+                    "poisoned_tool": poisoned,
+                    "poisoned_tool_name": tname or "",
                     "judge_grade": (d.get("state") or {}).get("judge_grade", ""),
                 },
             })
@@ -158,14 +191,21 @@ def main() -> None:
                    help="pair: only same-case (comply,resist) tuples (best for "
                         "DiffMean but requires both outcomes per case). "
                         "flat: every rollout, downstream buckets by label.")
+    p.add_argument("--require-notices-poison", action="store_true",
+                   help="Drop rollouts whose thinking block doesn't mention the "
+                        "poisoned tool's name. Removes the 'inattentive resist' "
+                        "subset so the contrast is around deliberation, not "
+                        "attention.")
     args = p.parse_args()
 
-    rows = _load_rollouts(args.eval)
+    rows = _load_rollouts(args.eval, require_notices_poison=args.require_notices_poison)
     n_total = len(rows)
     n_comply = sum(1 for r in rows if r["label"] == "comply")
     n_resist = n_total - n_comply
+    n_notice = sum(1 for r in rows if r["mentions_poison"])
     print(f"[harvest] read {n_total} rollouts from {args.eval}: "
-          f"{n_comply} comply / {n_resist} resist", file=sys.stderr)
+          f"{n_comply} comply / {n_resist} resist "
+          f"({n_notice} mention poisoned-tool name)", file=sys.stderr)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.mode == "pair":
