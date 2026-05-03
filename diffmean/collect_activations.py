@@ -100,7 +100,10 @@ def _truncate_at_decision(text: str) -> str:
     """For thinking-trace inputs, drop everything after the closing </think>.
     The post-think tool-call tokens are downstream of the decision moment we
     want to read activations from — keeping them only wastes forward compute
-    and inflates the sequence length 2-3x for verbose traces."""
+    and inflates the sequence length 2-3x for verbose traces.
+
+    Used by --mode decision. With --mode end we keep the full sequence and
+    capture at the very last token (post-tool-call commitment state)."""
     lower = text.lower()
     end = lower.rfind("</think>")
     if end < 0:
@@ -163,14 +166,15 @@ _last_token_residual = _residual_at
 
 
 def run(in_path: Path, out_dir: Path, model_name: str, layers: list[int],
-        device: str, max_len: int, limit: int | None, dtype: str) -> None:
+        device: str, max_len: int, limit: int | None, dtype: str,
+        mode: str = "decision") -> None:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     rows = list(read_jsonl(str(in_path)))
     if limit:
         rows = rows[:limit]
-    print(f"[collect] {len(rows)} rows, model={model_name}, layers={layers}, device={device}",
-          file=sys.stderr)
+    print(f"[collect] {len(rows)} rows, model={model_name}, layers={layers}, "
+          f"device={device}, mode={mode}", file=sys.stderr)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16,
@@ -209,9 +213,14 @@ def run(in_path: Path, out_dir: Path, model_name: str, layers: list[int],
             # H_neg[L] (lengths diverge). DiffMean is a difference of means,
             # not a difference of paired tuples — unequal lengths are fine.
             try:
-                h_pos = _residual_at(model, tokenizer, ctx + _truncate_at_decision(y_pos),
+                # `mode` selects what counts as the "last token":
+                #   decision: truncate at </think>, capture there
+                #   end:      keep full sequence, capture at end of tool call
+                ypos_in = _truncate_at_decision(y_pos) if mode == "decision" else y_pos
+                yneg_in = _truncate_at_decision(y_neg) if mode == "decision" else y_neg
+                h_pos = _residual_at(model, tokenizer, ctx + ypos_in,
                                      layers, device, max_len, ctx) if y_pos else None
-                h_neg = _residual_at(model, tokenizer, ctx + _truncate_at_decision(y_neg),
+                h_neg = _residual_at(model, tokenizer, ctx + yneg_in,
                                      layers, device, max_len, ctx) if y_neg else None
             except Exception as e:
                 print(f"  [{i}] skip ({type(e).__name__}: {str(e)[:120]})",
@@ -271,12 +280,18 @@ def main() -> None:
                    help="Hard cap on tokenized sequence length. Thinking traces "
                         "can be long (median ~430 tokens, max ~4700) — bump if "
                         "you see truncation in the smoke run.")
+    p.add_argument("--mode", choices=["decision", "end"], default="decision",
+                   help="Where to read activations: decision = at the closing "
+                        "</think> token (truncate post-think), end = at the "
+                        "very last token of the full rollout (post-tool-call). "
+                        "Run with both modes to compare which carries the "
+                        "steering direction.")
     p.add_argument("--limit", type=int, default=None, help="Smoke-test limit.")
     args = p.parse_args()
 
     layers = sorted({int(x) for x in args.layers.split(",") if x.strip()})
     run(args.in_path, args.out_dir, args.model, layers,
-        args.device, args.max_len, args.limit, args.dtype)
+        args.device, args.max_len, args.limit, args.dtype, args.mode)
 
 
 if __name__ == "__main__":
