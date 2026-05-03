@@ -96,6 +96,18 @@ def _build_chat_prompt(tokenizer, system_prompt: str, user_query: str) -> str:
         )
 
 
+def _truncate_at_decision(text: str) -> str:
+    """For thinking-trace inputs, drop everything after the closing </think>.
+    The post-think tool-call tokens are downstream of the decision moment we
+    want to read activations from — keeping them only wastes forward compute
+    and inflates the sequence length 2-3x for verbose traces."""
+    lower = text.lower()
+    end = lower.rfind("</think>")
+    if end < 0:
+        return text
+    return text[: end + len("</think>")]
+
+
 def _decision_token_pos(tokenizer, ctx: str, full_text: str) -> int:
     """Position of the *decision token* in the tokenized full_text.
 
@@ -197,9 +209,9 @@ def run(in_path: Path, out_dir: Path, model_name: str, layers: list[int],
             # H_neg[L] (lengths diverge). DiffMean is a difference of means,
             # not a difference of paired tuples — unequal lengths are fine.
             try:
-                h_pos = _residual_at(model, tokenizer, ctx + y_pos,
+                h_pos = _residual_at(model, tokenizer, ctx + _truncate_at_decision(y_pos),
                                      layers, device, max_len, ctx) if y_pos else None
-                h_neg = _residual_at(model, tokenizer, ctx + y_neg,
+                h_neg = _residual_at(model, tokenizer, ctx + _truncate_at_decision(y_neg),
                                      layers, device, max_len, ctx) if y_neg else None
             except Exception as e:
                 print(f"  [{i}] skip ({type(e).__name__}: {str(e)[:120]})",
@@ -255,7 +267,10 @@ def main() -> None:
                    ("mps" if torch.backends.mps.is_available() else "cpu"))
     p.add_argument("--dtype", default="bfloat16",
                    choices=["float16", "bfloat16", "float32"])
-    p.add_argument("--max-len", type=int, default=4096)
+    p.add_argument("--max-len", type=int, default=8192,
+                   help="Hard cap on tokenized sequence length. Thinking traces "
+                        "can be long (median ~430 tokens, max ~4700) — bump if "
+                        "you see truncation in the smoke run.")
     p.add_argument("--limit", type=int, default=None, help="Smoke-test limit.")
     args = p.parse_args()
 
