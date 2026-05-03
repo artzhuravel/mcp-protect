@@ -188,38 +188,44 @@ def run(in_path: Path, out_dir: Path, model_name: str, layers: list[int],
             # not a Phi/Gemma EOS marker that would dominate the DiffMean direction.
             y_pos = _strip_terminators(row.get("y_pos", ""))
             y_neg = _strip_terminators(row.get("y_neg", ""))
-            if not y_pos or not y_neg:
+            if not y_pos and not y_neg:
+                # Row has no usable response on either side.
                 continue
 
+            # Decoupled forwards: each side is independent, so a flat-mode row
+            # with only y_pos contributes a vector to H_pos[L] but nothing to
+            # H_neg[L] (lengths diverge). DiffMean is a difference of means,
+            # not a difference of paired tuples — unequal lengths are fine.
             try:
-                # One forward per response → dict {layer: [d_model]} for all requested layers.
                 h_pos = _residual_at(model, tokenizer, ctx + y_pos,
-                                     layers, device, max_len, ctx)
+                                     layers, device, max_len, ctx) if y_pos else None
                 h_neg = _residual_at(model, tokenizer, ctx + y_neg,
-                                     layers, device, max_len, ctx)
+                                     layers, device, max_len, ctx) if y_neg else None
             except Exception as e:
-                # OOM / tokenization edge cases: skip the row, keep the run going.
                 print(f"  [{i}] skip ({type(e).__name__}: {str(e)[:120]})",
                       file=sys.stderr)
                 continue
 
-            # Slot each layer's vector into its respective list. Order is preserved
-            # across layers, so H_pos[L][k] and H_neg[L][k] always refer to the same row.
             for L in layers:
-                H_pos[L].append(h_pos[L])
-                H_neg[L].append(h_neg[L])
-            kept = len(H_pos[layers[0]])
-            # Sidecar: row k in H_pos.pt corresponds to this id/tags. Used downstream
-            # for per-paradigm slicing (e.g. AUC on Template-1 only).
+                if h_pos is not None:
+                    H_pos[L].append(h_pos[L])
+                if h_neg is not None:
+                    H_neg[L].append(h_neg[L])
+            kept_p = len(H_pos[layers[0]])
+            kept_n = len(H_neg[layers[0]])
+            # Sidecar maps which output bucket(s) this row contributed to so we
+            # can later slice by attack paradigm / risk / label.
             idx_f.write(json.dumps({
-                "i": kept - 1,
+                "i_pos": (kept_p - 1) if h_pos is not None else None,
+                "i_neg": (kept_n - 1) if h_neg is not None else None,
                 "id": row.get("id"),
                 "source": row.get("source"),
+                "label": row.get("label"),
                 "tags": row.get("tags", {}),
             }, ensure_ascii=False) + "\n")
 
             if (i + 1) % 25 == 0:
-                print(f"  [{i+1}/{len(rows)}] kept={kept}", file=sys.stderr)
+                print(f"  [{i+1}/{len(rows)}] H_pos={kept_p} H_neg={kept_n}", file=sys.stderr)
 
     # Stack lists → tensors and persist. One subdir per layer keeps the analysis
     # script (compute_vector.py) trivial: just iterate L*/ dirs.
