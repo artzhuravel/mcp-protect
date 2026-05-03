@@ -166,10 +166,11 @@ class LoReftIntervention(torch.nn.Module):
         torch.nn.init.orthogonal_(self.R.weight)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
-        # h: [..., d_model]
-        proj = self.R(h)           # [..., rank]
-        edit = proj - self.b       # [..., rank]
-        return h + edit @ self.R.weight  # [..., d_model]
+        # Cast R and b to h's dtype so the intervention works with bf16/fp16 models.
+        w = self.R.weight.to(h.dtype)   # [rank, d_model]
+        b = self.b.to(h.dtype)          # [rank]
+        proj = h @ w.T - b              # [..., rank]
+        return h + proj @ w             # [..., d_model]
 
 
 # ---------------------------------------------------------------------------

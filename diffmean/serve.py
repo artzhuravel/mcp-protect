@@ -59,7 +59,9 @@ class _LoReftIntervention(torch.nn.Module):
         self.b = torch.nn.Parameter(torch.zeros(rank))
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
-        return h + (self.R(h) - self.b) @ self.R.weight
+        w = self.R.weight.to(h.dtype)
+        b = self.b.to(h.dtype)
+        return h + (h @ w.T - b) @ w
 
 
 # ---------- Steering hook (mirrors diffmean/steer.py) ----------------------
