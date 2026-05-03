@@ -1,11 +1,11 @@
 #!/bin/bash
 # Phase-1 sweep only — assumes activations and best-vector pick are done.
-# Smaller scope than the original pipeline:
-#   - max_tokens 4000 → 1500 (covers most thinking + tool call, 3-4x faster)
-#   - N 50 → 30
-#   - alpha range trimmed to ±2 (we know ±5+ breaks the model from Phase-0)
+# Scope tuned for ~4h GPU budget:
+#   - max_tokens 4000 → 2000 (covers most thinking + tool call, ~2x faster)
+#   - N=50 (richer signal than N=30)
+#   - alpha range ±2 (we know ±5+ breaks the model from Phase-0)
 #   - both modes (last-token, all-tokens)
-# Total: 5 alphas × 2 modes = 10 cells × ~5 min = ~50 min.
+# Total: 5 alphas × 2 modes = 10 cells × ~20 min = ~3.5h.
 set -euo pipefail
 cd /home/ubuntu/mcp-protect
 source .venv/bin/activate
@@ -65,8 +65,8 @@ for ALPHA in -2 -1 0 1 2; do
         vf-eval mcp_tox -m Qwen/Qwen3-8B \
             --api-key-var OPENAI_API_KEY \
             --api-base-url http://localhost:8000/v1 \
-            --num-examples 30 --rollouts-per-example 1 --max-concurrent 4 \
-            --max-tokens 1500 --temperature 0.0 \
+            --num-examples 50 --rollouts-per-example 1 --max-concurrent 4 \
+            --max-tokens 2000 --temperature 0.0 \
             --extra-env-kwargs "$EXTRA" \
             --output-dir "$SWEEP_OUT/$TAG" \
             --save-results --abbreviated-summary 2>&1 > "$SWEEP_OUT/$TAG.full.txt"
