@@ -146,7 +146,12 @@ class _Message(BaseModel):
 class ChatCompletionsRequest(BaseModel):
     model: str | None = None
     messages: list[_Message]
-    max_tokens: int | None = 512
+    # Accept both legacy `max_tokens` and the reasoning-model variant
+    # `max_completion_tokens`. Verifiers/OpenAI Python SDK switched to the
+    # latter for reasoning models — falling back to a 512 default silently
+    # truncated long thinking traces. _resolve_max() returns the larger value.
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
     temperature: float = 0.0
     top_p: float = 1.0
     stop: list[str] | str | None = None
@@ -156,11 +161,19 @@ class ChatCompletionsRequest(BaseModel):
 class CompletionsRequest(BaseModel):
     model: str | None = None
     prompt: str
-    max_tokens: int | None = 512
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
     temperature: float = 0.0
     top_p: float = 1.0
     stop: list[str] | str | None = None
     steering: _Steering | None = None
+
+
+def _resolve_max(req) -> int:
+    """Take the largest declared budget across the two fields, default 512."""
+    a = getattr(req, "max_tokens", None) or 0
+    b = getattr(req, "max_completion_tokens", None) or 0
+    return max(a, b) or 512
 
 
 # ---------- Generation core ------------------------------------------------
@@ -258,7 +271,7 @@ def chat_completions(req: ChatCompletionsRequest):
     alpha, layer, all_tok = _resolve_steer(req.steering)
     prompt = _render_chat(req.messages)
     text, n_in, n_out = _generate(
-        prompt, max_tokens=req.max_tokens or 512,
+        prompt, max_tokens=_resolve_max(req),
         temperature=req.temperature, top_p=req.top_p,
         stop=([req.stop] if isinstance(req.stop, str) else req.stop),
         alpha=alpha, layer=layer, all_tokens=all_tok,
