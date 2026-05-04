@@ -193,10 +193,15 @@ def run(pairs_path: Path, vec_path: Path, layer: int, alphas: list[float],
         modes: list[str], out_dir: Path, num_examples: int, batch_size: int,
         max_new_tokens: int, temperature: float, max_input_len: int,
         model_name: str, dtype: str, device: str, judge_model: str,
-        judge_concurrency: int) -> None:
+        judge_concurrency: int, paradigm_filter: str | None = None) -> None:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     rows = list(read_jsonl(str(pairs_path)))
+    if paradigm_filter:
+        before = len(rows)
+        rows = [r for r in rows if r.get("tags", {}).get("paradigm") == paradigm_filter]
+        print(f"[batched-eval] paradigm filter '{paradigm_filter}': {len(rows)}/{before} rows",
+              file=sys.stderr)
     if num_examples:
         rows = rows[:num_examples]
     print(f"[batched-eval] {len(rows)} rows, alphas={alphas}, modes={modes}, "
@@ -319,6 +324,10 @@ def main() -> None:
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--judge-model", default="openai/gpt-5.4-nano")
     p.add_argument("--judge-concurrency", type=int, default=16)
+    p.add_argument("--paradigm", default=None,
+                   help="If set, filter input pairs to only those with "
+                        "tags.paradigm matching (e.g. 'Template-2'). Used to "
+                        "evaluate per-template vectors on their own subset.")
     args = p.parse_args()
 
     alphas = [float(x) for x in args.alphas.split(",") if x.strip()]
@@ -328,7 +337,7 @@ def main() -> None:
         args.out_dir, args.num_examples, args.batch_size,
         args.max_new_tokens, args.temperature, args.max_input_len,
         args.model, args.dtype, args.device, args.judge_model,
-        args.judge_concurrency)
+        args.judge_concurrency, args.paradigm)
 
 
 if __name__ == "__main__":

@@ -19,29 +19,48 @@ above suggest the same pattern with cleaner data.
 
 ### 1. Per-template steering at L20 + L16 (highest priority)
 
-For each (vector, paradigm) pair, run vf-eval on the matching paradigm only.
+**Match the global sweep's alpha grid** so we can directly compare per-template
+vs global at each (layer, α). Use α ∈ {-15, -10, -5, 0, +5, +10, +15} —
+identical to layer_axis_allt_v2 but with the per-template vector. Optionally
+include ±3, ±1 for finer resolution near baseline.
+
+For each (vector, paradigm) we evaluate ONLY on cases of that paradigm. Need
+to either:
+  a) pre-filter `mcptox_pairs.clean.jsonl` by paradigm into 3 subset jsonls, OR
+  b) add a `--paradigm` CLI flag to `batched_steered_eval.py` that filters in.
+
+Option (b) is cleaner. To-do for the morning: add the filter flag, then:
 
 ```
-python -m diffmean.batched_steered_eval \
-  --pairs diffmean/outputs/mcptox_pairs.clean.jsonl \
-  --vec diffmean/outputs/acts/qwen3-thinking-decision/L20/by_paradigm/Template-2.pt \
-  --layer 20 \
-  --alphas=-10,-5,-3,-1,1,3,5,10 \
-  --modes=all \
-  --num-examples 50 \
-  --batch-size 4 \
-  --max-new-tokens 3000 \
-  --temperature 0.0 \
-  --out-dir diffmean/outputs/eval/per_template/L20_T2
+# Per-template at L20:
+for T in Template-1 Template-2 Template-3; do
+  python -m diffmean.batched_steered_eval \
+    --pairs diffmean/outputs/mcptox_pairs.clean.jsonl \
+    --vec diffmean/outputs/acts/qwen3-thinking-decision/L20/by_paradigm/$T.pt \
+    --layer 20 \
+    --alphas=-15,-10,-5,5,10,15 \
+    --modes=all \
+    --num-examples 50 \
+    --batch-size 4 \
+    --max-new-tokens 3000 \
+    --paradigm $T \
+    --out-dir diffmean/outputs/eval/per_template/L20_${T}
+done
 ```
 
-But this filters cases — we'd need to also pass `--paradigm-filter Template-2`
-which the env's mcp_tox already supports via `--extra-env-kwargs`. Better:
-write a small helper that pre-filters mcptox_pairs.clean.jsonl by paradigm.
+Same for L16. Adds α=0 baseline implicitly via the existing global L20 cell
+(no need to re-run α=0 since steering at α=0 is a no-op).
 
-**Cells**: 3 paradigms × 2 layers × 8 alphas = 48 cells × ~10 min @ N=50 ≈ **8h**.
-Trim to 2 paradigms (T1, T2 — skip T3 since it had global-equivalent AUC) × 2
-layers × 6 alphas = 24 cells ≈ **4h**.
+**Cells**: 3 templates × 2 layers × 6 alphas = 36 cells. With N=50 batched at
+~10 min/cell = **~6h**. Trim by:
+  - Drop Template-1 (only n_neg=3 in train set, will be too noisy)
+  - Drop α=±5 (or ±10) if budget tight
+  - 2 templates × 2 layers × 6 alphas = 24 cells ≈ **4h**
+
+**Comparison**: at each (α, layer) we'll have global-vector defense (from
+prior layer_axis_allt_v2 run, N=30) vs template-specific defense (this run,
+N=50). Cleanest if both are at N=50, but the prior data gives a directional
+read.
 
 ### 2. Resume L20 N=100 global sweep (skip α=-15 already done)
 
