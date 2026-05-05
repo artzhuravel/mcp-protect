@@ -56,7 +56,8 @@ def main() -> None:
     print(f"[select]   pos={tuple(H_pos.shape)}  neg={tuple(H_neg.shape)}")
 
     print(f"[select] loading SAE  {args.sae_path}")
-    sae = QwenScopeSAE.from_qwen_scope_file(args.sae_path).to(args.device)
+    weights = torch.load(args.sae_path, map_location="cpu", weights_only=True)
+    sae = QwenScopeSAE(weights, k=50, device=args.device)
     if sae.d_model != H_pos.shape[1]:
         raise SystemExit(
             f"SAE d_model {sae.d_model} != activation d_model {H_pos.shape[1]}"

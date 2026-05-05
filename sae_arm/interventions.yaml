@@ -1,16 +1,23 @@
-interventions:
-  # No-op: zero direction at layer 8. Output should match baseline byte-for-byte.
-  # Validates registry loading + hook lifecycle.
-  - name: noop-l8
-    hook_type: diffmean_add
-    layer: 8
-    scale: 1.0
-    direction_path: directions/zero_l8.pt
+# Interventions registered by sae_arm/server.py.
+# Each entry becomes a model id selectable via the OpenAI `model` field.
+# Empty list = only the implicit `baseline` is exposed.
+#
+# Template entries (commented out — uncomment after running the pipeline that
+# produces the matching .pt file):
+#
+# interventions:
+#   # DiffMean (vector addition):
+#   - name: diffmean-l20-a-2
+#     hook_type: diffmean_add
+#     layer: 20
+#     scale: -2.0          # negative pushes away from compliance
+#     direction_path: directions/diffmean_l20.pt
+#
+#   # SAE-filtered (Arad et al. S_out filter):
+#   - name: sae-filtered-l20-a-2
+#     hook_type: sae_clamp
+#     layer: 20
+#     scale: -2.0
+#     direction_path: directions/sae_filtered_l20.pt
 
-  # Random non-zero direction at layer 8. Output should differ from baseline,
-  # confirming the hook actually mutates the residual stream.
-  - name: random-l8
-    hook_type: diffmean_add
-    layer: 8
-    scale: 1.0
-    direction_path: directions/random_l8.pt
+interventions: []

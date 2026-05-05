@@ -1,21 +1,3 @@
-"""Step 3: filter candidates by S_out and produce a steering vector .pt file.
-
-Inputs:
-  --features-file  features.json from select_candidates.py
-  --s-out-file     s_out.json from compute_s_out.py
-  --sae-path       Qwen-Scope layer{N}.sae.pt
-  --layer          which layer to build the vector for
-  --threshold      default 0.1 (Arad et al. paper's recommended cut)
-  --top-n          optional: keep only the top-N filtered features by S_out
-
-Output:
-  --out  the steering vector as a (d_model,) tensor
-         alongside <out>.meta.json with provenance
-
-The vector is the unscaled sum of decoder columns of the surviving features:
-    v = sum_{i in filtered} W_dec[i, :]
-The interventions.yaml `scale` knob handles magnitude at inference time.
-"""
 from __future__ import annotations
 
 import argparse
@@ -23,6 +5,11 @@ import json
 from pathlib import Path
 
 import torch
+
+# Default output dir lives next to this script so vectors land in the same
+# place server.py / interventions.yaml looks regardless of where the build
+# script is invoked from.
+DIRECTIONS_DIR = Path(__file__).parent / "directions"
 
 from sae_utils import QwenScopeSAE
 
@@ -35,8 +22,18 @@ def main() -> None:
     p.add_argument("--layer", type=int, required=True)
     p.add_argument("--threshold", type=float, default=0.1)
     p.add_argument("--top-n", type=int, default=None)
-    p.add_argument("--out", type=Path, required=True)
+    p.add_argument(
+        "--out", type=Path, default=None,
+        help="Output .pt path. Defaults to "
+             "sae_arm/directions/sae_l{layer}_thr{threshold}[_top{top_n}].pt",
+    )
     args = p.parse_args()
+
+    if args.out is None:
+        parts = [f"sae_l{args.layer}", f"thr{args.threshold:g}"]
+        if args.top_n is not None:
+            parts.append(f"top{args.top_n}")
+        args.out = DIRECTIONS_DIR / ("_".join(parts) + ".pt")
 
     raw_features = json.loads(args.features_file.read_text())
     features_by_layer = {int(k): [int(v) for v in vs] for k, vs in raw_features.items()}
@@ -78,7 +75,8 @@ def main() -> None:
         print(f"  ... + {len(scored) - 10} more")
 
     print(f"[build] loading SAE  {args.sae_path}")
-    sae = QwenScopeSAE.from_qwen_scope_file(args.sae_path)
+    weights = torch.load(args.sae_path, map_location="cpu", weights_only=True)
+    sae = QwenScopeSAE(weights, k=50)
 
     steering = torch.zeros(sae.d_model, dtype=torch.float32)
     for fid, _ in scored:
