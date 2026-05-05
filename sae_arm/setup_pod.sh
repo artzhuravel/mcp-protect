@@ -42,14 +42,14 @@ p = snapshot_download(
 print(f"[setup] Qwen3-8B at {p}")
 PY
 
-# Step 4: pre-cache the four candidate-layer Qwen-Scope SAEs. Each layer file
-# is ~1 GB; we only need 8/16/24/32 for now. Add more later if the layer
-# sweep changes.
-echo "[setup] caching Qwen-Scope SAEs for layers 8/16/24/32 (~4 GB) ..."
+# Step 4: pre-cache Qwen-Scope SAEs for the layers the team's diffmean work
+# uses (12/16/20/24/28/32). Each layer file is ~1 GB; ~6 GB total. L20 is
+# where the team's strongest steering signal lives, so it's the priority.
+echo "[setup] caching Qwen-Scope SAEs for layers 12/16/20/24/28/32 (~6 GB) ..."
 python - <<'PY'
 from huggingface_hub import hf_hub_download
 REPO = "Qwen/SAE-Res-Qwen3-8B-Base-W64K-L0_50"
-for layer in (8, 16, 24, 32):
+for layer in (12, 16, 20, 24, 28, 32):
     p = hf_hub_download(REPO, filename=f"layer{layer}.sae.pt")
     print(f"[setup] SAE layer {layer}: {p}")
 PY
