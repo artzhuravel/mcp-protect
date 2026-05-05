@@ -224,3 +224,4 @@ sae_arm/directions/sae_*.pt
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+sae_arm/.test_artifacts/

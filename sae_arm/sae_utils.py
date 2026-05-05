@@ -16,7 +16,30 @@ Top-K SAE math (Qwen-Scope is L0_50 by default):
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import torch
+
+ROOT = Path(__file__).parent
+DIRECTIONS_DIR = ROOT / "directions"
+
+
+def out_dir_for(set_name: str, layer: int, paradigm: str | None, security_risk: str | None) -> Path:
+    """Canonical output directory for a build/eval cell.
+
+    Single source of truth for the path scheme; both build_steering_vector.py
+    and eval_mcptox.py import this so they can't drift.
+    """
+    base = DIRECTIONS_DIR / set_name / f"L{layer}"
+    if paradigm and security_risk:
+        risk_seg = security_risk.replace(" ", "_")
+        return base / "by_paradigm_and_security_risk" / f"{paradigm}_{risk_seg}"
+    if paradigm:
+        return base / "by_paradigm" / paradigm
+    if security_risk:
+        return base / "by_security_risk" / security_risk.replace(" ", "_")
+    return base
 
 
 class QwenScopeSAE:
@@ -78,13 +101,16 @@ class QwenScopeSAE:
         self.k = k
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
+        # Qwen-Scope's TopK SAE applies TopK *directly* to the raw pre-
+        # activations — no ReLU before TopK (per the model card's reference
+        # extraction code). Surviving values keep their sign; clamping to
+        # non-negative would lose information the SAE was trained to use.
         x = x.to(self.W_enc.dtype)
         pre = x @ self.W_enc + self.b_enc
-        post = torch.relu(pre)
         if self.k is None or self.k >= self.d_sae:
-            return post
-        topk_vals, topk_idx = post.topk(self.k, dim=-1)
-        out = torch.zeros_like(post)
+            return pre
+        topk_vals, topk_idx = pre.topk(self.k, dim=-1)
+        out = torch.zeros_like(pre)
         out.scatter_(-1, topk_idx, topk_vals)
         return out
 
@@ -94,3 +120,38 @@ class QwenScopeSAE:
 
     def feature_direction(self, feature_idx: int) -> torch.Tensor:
         return self.W_dec[feature_idx, :].clone()
+
+
+def stratify_activations(
+    H_pos: torch.Tensor,
+    H_neg: torch.Tensor,
+    index_path,
+    *,
+    paradigm: str | None = None,
+    security_risk: str | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+
+    if paradigm is None and security_risk is None:
+        return H_pos, H_neg
+
+    keep_pos: list[int] = []
+    keep_neg: list[int] = []
+    with open(index_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            tags = entry.get("tags", {})
+            if paradigm is not None and tags.get("paradigm") != paradigm:
+                continue
+            if security_risk is not None and tags.get("security_risk") != security_risk:
+                continue
+            i_pos = entry.get("i_pos")
+            i_neg = entry.get("i_neg")
+            if i_pos is not None:
+                keep_pos.append(i_pos)
+            if i_neg is not None:
+                keep_neg.append(i_neg)
+
+    return H_pos[keep_pos], H_neg[keep_neg]

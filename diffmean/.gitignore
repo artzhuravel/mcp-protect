@@ -1,5 +1,0 @@
-__pycache__/
-*.pyc
-outputs/acts/
-outputs/steered/
-*.pt

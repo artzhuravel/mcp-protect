@@ -12,6 +12,12 @@ cd "$REPO_ROOT"
 
 VENV="$REPO_ROOT/sae_arm/.venv"
 
+# Step 0: stage the team's activations + MCPTox pairs file under sae_arm/.
+# This branch dropped diffmean/ to keep the pod clone slim; fetch_team_data.sh
+# pulls only the bytes we need from origin/main without re-materializing the
+# diffmean/ tree. Idempotent — safe across reruns.
+bash "$REPO_ROOT/sae_arm/fetch_team_data.sh"
+
 # Step 1: venv + deps
 if [ ! -d "$VENV" ]; then
   echo "[setup] creating venv at $VENV"
@@ -54,18 +60,19 @@ for layer in (12, 16, 20, 24, 28, 32):
     print(f"[setup] SAE layer {layer}: {p}")
 PY
 
-# Step 5: cache MCPTox data (build_directions.py would do this lazily; we do
-# it now so the first run isn't bottlenecked on a clone).
+# Step 5: cache MCPTox raw data. Not strictly needed for our SAE pipeline
+# (we use sae_arm/mcptox_pairs.clean.jsonl, staged in Step 0), but useful
+# if anyone wants to re-run the team's harvest extractor.
 DATA="$REPO_ROOT/prime-envs/tmp/mcptox/response_all.json"
 if [ ! -f "$DATA" ]; then
-  echo "[setup] cloning MCPTox data ..."
+  echo "[setup] cloning MCPTox raw data ..."
   TMPDIR_CLONE="$(mktemp -d)"
   git clone --depth 1 https://github.com/zhiqiangwang4/MCPTox-Benchmark.git "$TMPDIR_CLONE"
   mkdir -p "$(dirname "$DATA")"
   cp "$TMPDIR_CLONE/response_all.json" "$DATA"
   rm -rf "$TMPDIR_CLONE"
 fi
-echo "[setup] MCPTox data at $DATA ($(du -h "$DATA" | cut -f1))"
+echo "[setup] MCPTox raw data at $DATA ($(du -h "$DATA" | cut -f1))"
 
 # Step 6: post-setup smoke test (loads the model, runs one forward pass).
 # Catches OOM / dtype / chat-template issues now, not later.
@@ -92,12 +99,18 @@ cat <<EOF
 [setup] done. Activate the venv and start working:
 
     source sae_arm/.venv/bin/activate
+    SAE=\$HOME/.cache/huggingface/hub/models--Qwen--SAE-Res-Qwen3-8B-Base-W64K-L0_50/snapshots/*/layer20.sae.pt
 
-    # Phase 2: build the real DiffMean directions (~15-30 min on A100):
-    python sae_arm/build_directions.py --device cuda --layers 8 16 24 32 \\
-        --max-train-pairs 600 --out-dir sae_arm/directions
+    # Build a filtered-SAE steering vector (Path B candidates + Arad S_out
+    # filter + decoder-column sum + AUC). Outputs land under
+    # sae_arm/directions/<set>/L<layer>/[strata/]/.
+    python sae_arm/build_steering_vector.py --set qwen3-v2-contrast --layer 20 \\
+        --sae-path \$SAE --threshold 0.1
 
-    # Then start the server (separate shell or tmux):
-    python sae_arm/server.py --device cuda --port 8000 \\
-        --registry sae_arm/interventions.yaml
+    # Eval the steered model against MCPTox (alpha sweep, async judge,
+    # defense_curve folded back into meta.json).
+    export OPENROUTER_API_KEY=...
+    python sae_arm/eval_mcptox.py --set qwen3-v2-contrast --layer 20 \\
+        --threshold 0.1 \\
+        --alphas -10,-5,-2,-1,0,1,2,5,10
 EOF

@@ -179,25 +179,28 @@ After that, the experiment loop is:
 
 ```bash
 source sae_arm/.venv/bin/activate
+SAE=$HOME/.cache/huggingface/hub/models--Qwen--SAE-Res-Qwen3-8B-Base-W64K-L0_50/snapshots/*/layer20.sae.pt
 
-# Phase 2: real DiffMean directions on Qwen3-8B (~15-30 min on A100)
-python sae_arm/build_directions.py --device cuda --layers 8 16 24 32 \
-    --max-train-pairs 600 --out-dir sae_arm/directions
+# Phase 4: build a filtered-SAE steering vector. Path B candidates, Arad et al.
+# S_out filter, decoder-column sum. Cache-aware: re-running with a different
+# --threshold reuses the candidate ranking and S_out scores.
+python sae_arm/build_steering_vector.py --set qwen3-v2-contrast --layer 20 \
+    --sae-path $SAE --threshold 0.1
+# → sae_arm/directions/qwen3-v2-contrast/L20/{features.json, s_out.json,
+#   feature_logit_lens.json, sae_thr0.1.pt, sae_thr0.1.meta.json}
 
-# Start the intervention server (separate tmux window)
-python sae_arm/server.py --device cuda --port 8000 \
-    --registry sae_arm/interventions.yaml
-
-# Eval the served policy with vf-eval (third tmux window). Override the
-# typo'd judge default until it's patched upstream.
-cd prime-envs && uv pip install -e ./environments/mcp_tox
+# Phase 5: eval the steered model against MCPTox (alpha sweep, async LLM
+# judge via OpenRouter, defense_curve folded back into meta.json).
 export OPENROUTER_API_KEY=...
-vf-eval mcp-tox -b http://127.0.0.1:8000/v1 -k EMPTY \
-    --api-client-type openai_chat_completions -m baseline \
-    -a '{"judge_model":"openai/gpt-5-mini"}' -n 50 -r 1 -s
+python sae_arm/eval_mcptox.py --set qwen3-v2-contrast --layer 20 \
+    --threshold 0.1 \
+    --alphas -10,-5,-2,-1,0,1,2,5,10
+# → sae_arm/directions/qwen3-v2-contrast/L20/eval_thr0.1/{summary.jsonl, alpha_*}
 ```
 
-Networking: vf-eval can run on the pod itself (cheapest), or on the laptop with an SSH tunnel `ssh -L 8000:127.0.0.1:8000 user@pod`.
+Stratified runs (per-paradigm or per-risk): pass `--paradigm Template-2` (or
+`--security-risk "Credential Leakage"`) to both scripts; outputs land under
+`directions/<set>/L<layer>/by_paradigm/<x>/` (or `by_security_risk/<x>/`).
 
 ## 12. Open items
 
