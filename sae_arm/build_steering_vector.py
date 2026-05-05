@@ -61,8 +61,13 @@ def select_candidates(
     mean_neg = sums_neg / max(H_neg.shape[0], 1)
     diff = (mean_pos - mean_neg).cpu()
     topk_idx = diff.abs().topk(top_k).indices
-    feature_ids = topk_idx.tolist()
-    signs = diff[topk_idx].sign().to(torch.int64).tolist()
+    sign_vals = diff[topk_idx].sign().to(torch.int64)
+    # Drop sign==0 candidates: features that fire identically (usually zero)
+    # on both classes contribute nothing to v and waste an S_out call. Common
+    # in stratified slices where many TopK-SAE features are silent in both.
+    keep = sign_vals != 0
+    feature_ids = topk_idx[keep].tolist()
+    signs = sign_vals[keep].tolist()
     return feature_ids, signs
 
 
