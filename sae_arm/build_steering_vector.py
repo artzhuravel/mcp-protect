@@ -73,7 +73,11 @@ def compute_s_out_one(
     sentence: str, amp_factor: float,
 ) -> float:
     def sae_hook(module, args, output):
-        output_tensor = output[0]
+        # transformers v5 Qwen3 layers return the hidden-states tensor
+        # directly; older versions returned a (hidden_states, ...) tuple.
+        # Handle both so this works across pinned-and-unpinned envs.
+        is_tuple = isinstance(output, (tuple, list))
+        output_tensor = output[0] if is_tuple else output
         feature_acts = sae.encode(output_tensor)
 
         with torch.no_grad():
@@ -85,7 +89,10 @@ def compute_s_out_one(
             feature_acts[:, -1, feature] += max_act_value * amp_factor
 
         sae_out = sae.decode(feature_acts).to(torch.float32) + sae_error
-        return tuple([sae_out.to(output_tensor.dtype)] + list(output[1:]))
+        sae_out_typed = sae_out.to(output_tensor.dtype)
+        if is_tuple:
+            return tuple([sae_out_typed] + list(output[1:]))
+        return sae_out_typed
 
     layer_module = model.model.layers[layer]
     handle = layer_module.register_forward_hook(sae_hook, always_call=True)
