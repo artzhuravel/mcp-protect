@@ -222,12 +222,50 @@ rsync -avz -e "ssh -i ~/.ssh/primeintellect_ed25519" --include='*/' --include='t
 
 Same for v12 once trained, gemma9b_v2_overnight, and any other variants we want to publish.
 
+## Diagnostic B — thinking-mode mismatch sanity check (planned, ~30 min on box2)
+
+**Hypothesis to test**: v3-v11 hypernets were trained with the model's chat template (which on Qwen3 defaults to `enable_thinking=True`, giving `<think>…</think>` blocks). If at inference time the template is silently in non-thinking mode (or vice versa), the hypernet sees a different distribution than at training and the steering vector is mis-aligned.
+
+**Test**: take an existing v3 hypernet, run vf-eval mcp_tox N=20 in TWO conditions:
+1. `enable_thinking=True` (current default — what we've been measuring)
+2. `enable_thinking=False`
+
+If v3 produces meaningful AR shift in non-thinking mode but not in thinking mode (or vice versa), the mismatch hypothesis is confirmed and we need to either match training mode or train both modes. If v3 is flat in both modes, the mismatch isn't dominant.
+
+Cost: ~30 min on box 2 (one extra config of an existing model). Run after current box 2 chain finishes.
+
+## Git discipline (executor responsibility)
+
+### Order matters: submodule first, then parent
+
+axbench is a submodule pointing at `autinn/axbench` (we DO have push access to the `mcpattack` branch — verified 2026-05-05 16:55, push of `7db36b4` succeeded). If you bump the parent's pointer before pushing the submodule, the parent points at a SHA the remote doesn't have → broken clone for everyone else.
+
+```
+1. cd axbench && git add … && git commit && git push origin mcpattack
+2. cd ..    && git add axbench EXPERIMENT_QUEUE.md … && git commit && git push origin axbench
+```
+
+### What to commit IMMEDIATELY (block on these — do not start new work first)
+
+These are load-bearing artifacts that exist only on the laptop. Until they're on remote, every box is one laptop crash from being unrecoverable:
+- Code fix in `axbench/` (e.g. data_utils.py truncation fix)
+- Trained model dump (`axbench/outputs/mcp_hsteer_*`) — sync to local + commit pointer
+- Eval result that informs a decision (full results.jsonl + metadata.json)
+- An update to EXPERIMENT_QUEUE.md
+- Evidence behind a "we should do X" decision
+
+### Going forward — rule of thumb
+
+Commit + push BEFORE moving on whenever you produce one of the above.
+Smaller, more frequent commits are correct. Don't batch. The cost of an extra `git push` is zero. The cost of a reaped box or laptop crash with uncommitted work is hours-to-days of re-derivation.
+
 ## Process habits to remember
 
 - **Always update this queue file** when starting/completing/changing experiments. Source of truth.
 - **Manual inspection between phases** — don't trust aggregate metrics, read 5+ raw completions per cell. The v10 0.81→0.66 sample-size delusion shows what happens otherwise.
 - **Max out GPU util for v12** on A100. Smoke-test batch sizes first; pick the largest that fits with 10GB headroom.
 - **Sync trained weights to local often**. Each retrain produces a paper-shareable artifact; cloud boxes get reaped.
+- **Commit + push code fixes immediately** (see git discipline section).
 
 ## Standing rules I keep getting bitten by
 - vf-eval `--max-concurrent` > 1 deadlocks env worker — use 1.
