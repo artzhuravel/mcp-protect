@@ -194,6 +194,19 @@ prime-envs/.venv/
 prime-envs/uv.lock
 prime-envs/.claude/
 
+# SAE arm: locally produced artifacts
+sae_arm/directions/_smoke/
+sae_arm/directions/diffmean_*.pt
+sae_arm/directions/diffmean_*.json
+sae_arm/directions/diffmean_*.jsonl
+sae_arm/directions/sae_*.pt
+
+# Claude Code local state
+.claude/
+
+# Reference papers (re-downloadable; keep out of git)
+*.pdf
+
 # Ruff stuff:
 .ruff_cache/
 

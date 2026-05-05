@@ -1,0 +1,16 @@
+interventions:
+  # No-op: zero direction at layer 8. Output should match baseline byte-for-byte.
+  # Validates registry loading + hook lifecycle.
+  - name: noop-l8
+    hook_type: diffmean_add
+    layer: 8
+    scale: 1.0
+    direction_path: directions/zero_l8.pt
+
+  # Random non-zero direction at layer 8. Output should differ from baseline,
+  # confirming the hook actually mutates the residual stream.
+  - name: random-l8
+    hook_type: diffmean_add
+    layer: 8
+    scale: 1.0
+    direction_path: directions/random_l8.pt
