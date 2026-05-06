@@ -38,8 +38,8 @@ def select_candidates(
     sae: QwenScopeSAE,
     top_k: int,
     chunk: int = 256,
-) -> tuple[list[int], list[int]]:
-    """Return (feature_ids, signs) for the top-K features by |mean_pos - mean_neg|.
+) -> tuple[list[int], list[int], list[float]]:
+    """Return (feature_ids, signs, diffs) for the top-K features by |mean_pos - mean_neg|.
 
     Sign tells you which class the feature fires more on:
       sign = +1: feature fires more on H_pos (compliance-correlated)
@@ -49,6 +49,11 @@ def select_candidates(
     decoder column points toward "resistance," so it must be subtracted (not
     added) when building a "compliance direction." Tracking sign here and
     applying it in assemble_steering_vector keeps v cleanly oriented.
+
+    `diffs` carries the signed magnitude (mean_pos - mean_neg) for each kept
+    feature — used by the --weighting=diff variant to weight decoder columns
+    by how strongly each feature differentiates the classes, instead of
+    binarizing to ±1.
     """
     device = sae.W_enc.device
     sums_pos = torch.zeros(sae.d_sae, dtype=torch.float32, device=device)
@@ -68,7 +73,8 @@ def select_candidates(
     keep = sign_vals != 0
     feature_ids = topk_idx[keep].tolist()
     signs = sign_vals[keep].tolist()
-    return feature_ids, signs
+    diffs = diff[topk_idx][keep].tolist()
+    return feature_ids, signs, diffs
 
 
 def compute_s_out_one(
@@ -142,33 +148,49 @@ def assemble_steering_vector(
     sae: QwenScopeSAE,
     candidate_ids: list[int],
     candidate_signs: list[int],
+    candidate_diffs: list[float],
     s_out: dict[int, float],
     threshold: float,
     top_n: int | None,
-) -> tuple[torch.Tensor, list[tuple[int, int, float]]]:
-    """Arad et al.'s filter recipe + sign-aware decoder sum.
+    weighting: str,
+) -> tuple[torch.Tensor, list[tuple[int, int, float, float]]]:
+    """Decoder-column sum with sign-only or diff-weighted weighting.
 
-    For each surviving feature i:
-      - sign = +1 (compliance-correlated) → add  +W_dec[i, :]
-      - sign = -1 (resistance-correlated) → add  -W_dec[i, :]
-    Net result: v points "compliance-ward" regardless of which class the
-    feature fired more on. Steering convention: +α·v pushes toward
-    compliance, -α·v defends.
+    --weighting sign  (default, Arad-style):
+      For each surviving feature i:
+        - sign = +1 (compliance-correlated) → add  +W_dec[i, :]
+        - sign = -1 (resistance-correlated) → add  -W_dec[i, :]
+      Each surviving feature contributes equally to the direction; magnitude
+      of the activation diff is discarded.
+
+    --weighting diff  (DiffMean-in-feature-space-style):
+      For each surviving feature i, contribute (mean_pos - mean_neg)[i] *
+      W_dec[i, :]. Sign is preserved automatically (diff is signed). Features
+      with stronger differential activation between H_pos and H_neg get more
+      weight; weaker features contribute less. Closer to a naive SAE-DiffMean
+      baseline.
+
+    Either way, v points "compliance-ward"; +α·v pushes toward compliance,
+    -α·v defends. v gets unit-normalized at eval time, so the absolute
+    magnitude here is irrelevant — only the relative weighting between
+    features matters, which is the actual difference between the two modes.
     """
     sign_map = dict(zip(candidate_ids, candidate_signs))
+    diff_map = dict(zip(candidate_ids, candidate_diffs))
     scored = [
-        (fid, sign_map[fid], s_out[fid])
+        (fid, sign_map[fid], diff_map[fid], s_out[fid])
         for fid in candidate_ids
         if s_out.get(fid, 0.0) >= threshold
     ]
-    scored.sort(key=lambda t: -t[2])
+    scored.sort(key=lambda t: -t[3])
     if top_n is not None:
         scored = scored[:top_n]
     if not scored:
         raise SystemExit(f"no features survive S_out >= {threshold}")
     v = torch.zeros(sae.d_model, dtype=torch.float32)
-    for fid, sign, _ in scored:
-        v = v + sign * sae.W_dec[fid, :].cpu().float()
+    for fid, sign, diff, _ in scored:
+        weight = float(sign) if weighting == "sign" else float(diff)
+        v = v + weight * sae.W_dec[fid, :].cpu().float()
     return v, scored
 
 
@@ -188,6 +210,12 @@ def main() -> None:
                    help="Step-3: drop features with S_out below this.")
     p.add_argument("--top-n", type=int, default=None,
                    help="Step-3: optionally keep only the top-N filtered features.")
+    p.add_argument("--weighting", choices=["sign", "diff"], default="sign",
+                   help="How to weight surviving features in the decoder-column sum. "
+                        "'sign' (default) gives each feature ±1 weight (Arad-style). "
+                        "'diff' weights by the activation diff magnitude (closer to "
+                        "naive SAE-DiffMean). Output filename gets a '_diffw' suffix "
+                        "when 'diff' so both variants coexist.")
     p.add_argument("--model-name", default="Qwen/Qwen3-8B")
     p.add_argument("--neutral-prompt", default="In my experience,")
     p.add_argument("--amp-factor", type=float, default=10.0)
@@ -218,6 +246,34 @@ def main() -> None:
         _check_cache_provenance(features_path, cached, step1_provenance)
         candidate_ids = cached["feature_ids"]
         candidate_signs = cached["signs"]
+        # Backward-compat: pre-diffw caches don't have "diffs". Recompute on
+        # demand only if --weighting=diff is requested; sign-only doesn't need
+        # them and won't trigger the rebuild.
+        candidate_diffs = cached.get("diffs")
+        if candidate_diffs is None and args.weighting == "diff":
+            print("[step 1] cache missing 'diffs' field; recomputing for --weighting=diff ...")
+            acts_dir = ACTS_DIR / args.set / f"L{args.layer}"
+            index_path = ACTS_DIR / args.set / "index.jsonl"
+            H_pos = torch.load(acts_dir / "H_pos.pt", map_location=device, weights_only=True).float()
+            H_neg = torch.load(acts_dir / "H_neg.pt", map_location=device, weights_only=True).float()
+            if args.paradigm or args.security_risk:
+                H_pos, H_neg = stratify_activations(
+                    H_pos, H_neg, index_path,
+                    paradigm=args.paradigm, security_risk=args.security_risk,
+                )
+            new_ids, new_signs, candidate_diffs = select_candidates(H_pos, H_neg, sae, args.top_k)
+            assert new_ids == candidate_ids and new_signs == candidate_signs, (
+                "select_candidates produced different IDs/signs on recompute — "
+                "cache is stale or non-deterministic; rm features.json and rebuild."
+            )
+            # Persist the diffs back so future builds skip this step.
+            features_path.write_text(json.dumps({
+                **step1_provenance,
+                "feature_ids": candidate_ids,
+                "signs": candidate_signs,
+                "diffs": candidate_diffs,
+            }))
+            print(f"[step 1] backfilled 'diffs' into {features_path}")
         print(f"[step 1] cached: {len(candidate_ids)} candidates  ({features_path})")
     else:
         print("[step 1] selecting candidates by activation diff (Path B) ...")
@@ -233,11 +289,12 @@ def main() -> None:
             print(f"[step 1] stratified to H_pos={tuple(H_pos.shape)}  H_neg={tuple(H_neg.shape)}")
         if H_pos.shape[0] == 0 or H_neg.shape[0] == 0:
             raise SystemExit("stratified H_pos or H_neg is empty; widen the filter")
-        candidate_ids, candidate_signs = select_candidates(H_pos, H_neg, sae, args.top_k)
+        candidate_ids, candidate_signs, candidate_diffs = select_candidates(H_pos, H_neg, sae, args.top_k)
         features_path.write_text(json.dumps({
             **step1_provenance,
             "feature_ids": candidate_ids,
             "signs": candidate_signs,
+            "diffs": candidate_diffs,
         }))
         print(f"[step 1] wrote {features_path} "
               f"({len(candidate_ids)} candidates: "
@@ -303,11 +360,15 @@ def main() -> None:
 
     # Step 3: filter and assemble.
     v, kept = assemble_steering_vector(
-        sae, candidate_ids, candidate_signs, s_out, args.threshold, args.top_n,
+        sae, candidate_ids, candidate_signs, candidate_diffs,
+        s_out, args.threshold, args.top_n, args.weighting,
     )
 
+    # Output filename: sign-only stays "sae_thr<X>.pt" so the existing files
+    # are unaffected. diff-weighted gets "_diffw" so both variants coexist.
     suffix = f"_top{args.top_n}" if args.top_n else ""
-    out_pt = out_dir / f"sae_thr{args.threshold:g}{suffix}.pt"
+    weight_tag = "_diffw" if args.weighting == "diff" else ""
+    out_pt = out_dir / f"sae_thr{args.threshold:g}{suffix}{weight_tag}.pt"
     torch.save(v, out_pt)
 
     # In-sample AUC of the steering vector against the same H_pos/H_neg (stratified the same way). Mann-Whitney U based.
@@ -348,9 +409,11 @@ def main() -> None:
         "security_risk": args.security_risk,
         "threshold": args.threshold,
         "top_n": args.top_n,
+        "weighting": args.weighting,
         "n_features_kept": len(kept),
         "n_candidates": len(candidate_ids),
-        "features": [{"id": fid, "sign": sign, "s_out": s} for fid, sign, s in kept],
+        "features": [{"id": fid, "sign": sign, "diff": diff, "s_out": s}
+                     for fid, sign, diff, s in kept],
         "norm": float(v.norm()),
         "d_model": sae.d_model,
         "sae_path": str(args.sae_path),

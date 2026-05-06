@@ -52,6 +52,9 @@ def main() -> None:
                         "eval-time filter unless --no-security-risk-filter.")
     p.add_argument("--threshold", type=float, default=0.1)
     p.add_argument("--top-n", type=int, default=None)
+    p.add_argument("--weighting", choices=["sign", "diff"], default="sign",
+                   help="Must match the build's --weighting. 'sign' resolves to "
+                        "sae_thr<X>.pt; 'diff' resolves to sae_thr<X>_diffw.pt.")
     # Eval knobs
     p.add_argument("--alphas", default="-15,-10,-5,0,5,10,15",
                    help="Default matches the team's published Phase-2 sweep "
@@ -99,9 +102,10 @@ def main() -> None:
 
     base_dir = out_dir_for(args.set, args.layer, args.paradigm, args.security_risk)
     suffix = f"_top{args.top_n}" if args.top_n else ""
-    vec_path = base_dir / f"sae_thr{args.threshold:g}{suffix}.pt"
-    meta_path = base_dir / f"sae_thr{args.threshold:g}{suffix}.meta.json"
-    eval_out = base_dir / f"eval_thr{args.threshold:g}{suffix}"
+    weight_tag = "_diffw" if args.weighting == "diff" else ""
+    vec_path = base_dir / f"sae_thr{args.threshold:g}{suffix}{weight_tag}.pt"
+    meta_path = base_dir / f"sae_thr{args.threshold:g}{suffix}{weight_tag}.meta.json"
+    eval_out = base_dir / f"eval_thr{args.threshold:g}{suffix}{weight_tag}"
 
     if not vec_path.exists():
         raise SystemExit(
