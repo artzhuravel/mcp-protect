@@ -51,6 +51,14 @@ if [ -z "${OPENROUTER_API_KEY:-}" ]; then
     exit 1
 fi
 
+# Throughput knobs — overridable at launch time. Defaults sized for A100 80GB
+# with Qwen3-8B bf16; bump BATCH_SIZE if nvidia-smi shows headroom (>20 GB free
+# mid-eval), drop it if you OOM. JUDGE_CONCURRENCY is OpenRouter parallelism,
+# not GPU.
+BATCH_SIZE=${BATCH_SIZE:-16}
+JUDGE_CONCURRENCY=${JUDGE_CONCURRENCY:-16}
+echo "[sweep] batch_size=$BATCH_SIZE  judge_concurrency=$JUDGE_CONCURRENCY"
+
 # Per-run log dir (timestamped)
 LOG_DIR="sae_arm/run_logs/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_DIR"
@@ -90,6 +98,7 @@ cell() {
     if python sae_arm/eval_mcptox.py \
         --set "$SET" --layer "$LAYER" --paradigm "$PARADIGM" \
         --threshold "$THRESHOLD" \
+        --batch-size "$BATCH_SIZE" --judge-concurrency "$JUDGE_CONCURRENCY" \
         > "$LOG_DIR/${LABEL}.eval.log" 2>&1
     then
         echo "  eval   OK    ($(($(date +%s) - EVAL_START))s)"
