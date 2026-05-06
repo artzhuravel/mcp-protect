@@ -1,0 +1,54 @@
+{
+  "WARNING_synthetic_sae": null,
+  "set": "qwen3-thinking-decision",
+  "layer": 16,
+  "paradigm": "Template-2",
+  "security_risk": null,
+  "threshold": 0.05,
+  "top_n": null,
+  "weighting": "diff",
+  "n_features_kept": 5,
+  "n_candidates": 95,
+  "features": [
+    {
+      "id": 53789,
+      "sign": -1,
+      "diff": -0.1383928656578064,
+      "s_out": 0.5097523927688599
+    },
+    {
+      "id": 46040,
+      "sign": -1,
+      "diff": -1.2678571939468384,
+      "s_out": 0.16033798723790338
+    },
+    {
+      "id": 38031,
+      "sign": -1,
+      "diff": -0.8325893878936768,
+      "s_out": 0.11885496977576045
+    },
+    {
+      "id": 37432,
+      "sign": -1,
+      "diff": -1.5491070747375488,
+      "s_out": 0.11408734482883891
+    },
+    {
+      "id": 31799,
+      "sign": 1,
+      "diff": 0.024553537368774414,
+      "s_out": 0.10177133444977356
+    }
+  ],
+  "norm": 2.3219594955444336,
+  "d_model": 4096,
+  "sae_path": "/home/ubuntu/.cache/huggingface/hub/models--Qwen--SAE-Res-Qwen3-8B-Base-W64K-L0_50/snapshots/31b772ba391ca0b48861dd876827e905045efeec/layer16.sae.pt",
+  "n_pos": 14,
+  "n_neg": 28,
+  "score_pos_mean": -14.768624305725098,
+  "score_neg_mean": -16.975391387939453,
+  "cos_pos_mean": -0.19727203249931335,
+  "cos_neg_mean": -0.22060494124889374,
+  "auc": 0.8698979591836735
+}
