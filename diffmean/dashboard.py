@@ -29,6 +29,41 @@ HSTEER_VARIANT_KEY = {
     "v8":  "133 concepts × hand-crafted refusal templates (concept↔y_neg INCOHERENT)",
     "v10": "single concept + refusal templates (coherent — first +pts result, but partly artifact)",
     "v11": "single concept + audit-prompted deliberate-resist y_neg from qwen3_v2_contrast.jsonl (the 'right' recipe)",
+    "v11_FIXED": "v11 re-trained at L20 with truncation fix (max_input_length=2048) — sanity baseline",
+    "v14": "v17 data + DPO contrastive loss (rejected after eval — contrastive doesn't flip direction; AR≈baseline)",
+    "v15": "single concept × audit-style 111-row dataset, L20 (predecessor to v17 — AR≈baseline + minor lift)",
+    "v17": "★ HEADLINE — single concept × 117 hand-crafted terse defense templates (with <think>) at L20. Post-regrade f=+0.7 = AR 0.86 (clean win). At f=+1.0 thinking suppressed → AR 0.94 with has_think=0/50 (artifact).",
+    "v18": "v17 data with rank=4 hypernet (vs rank=1) — slight lift but same suppression at f=+1.0; rank does not matter much",
+    "v19": "★ v17 data with <think> stripped (terse no-think). Post-regrade f=+0.3 = AR 0.72 (cleanest low-factor win, thinking preserved). At f=+1.0 same suppression artifact as v17.",
+    "v21": "v17 data trained at L24 instead of L20 — confirms L24 is causally inert (range 0.07 vs L20's 0.33). DROPPED.",
+    "v22": "12 attack-archetype concepts × ~17 v19-style rows each (200 total, judge-filtered gpt-5.4-nano synth). First multi-concept run on Qwen3-8B.",
+}
+
+# Hand-curated headline summary surfaced at the top of the page (post-regrade, 2026-05-06).
+# Keep this short — full prose lives in EXPERIMENT_HANDOFF.md §0.5/§0.6.
+HEADLINES = {
+    "as_of": "2026-05-06 PM",
+    "tagline": "Two clean wins post-regrade. f=1.0 cells are thinking-suppression artifacts (has_think=0/50). Real defense regime is f=0.7–0.8.",
+    "rows": [
+        {"label": "v17 hypersteer @ f=+0.7 (N=50)", "ar": 0.86, "delta_vs_baseline": +0.20,
+         "has_think": "50/50", "note": "★ headline win — terse defense templates, thinking preserved"},
+        {"label": "v19 hypersteer @ f=+0.3 (N=50)", "ar": 0.72, "delta_vs_baseline": +0.16,
+         "has_think": "50/50", "note": "★ cleanest secondary — terse no-think data, low factor"},
+        {"label": "v17 fine sweep @ f=0.75/0.80 (N=20)", "ar": 0.95, "delta_vs_baseline": +0.29,
+         "has_think": "20/20", "note": "newest, needs N=50 confirm + regrade"},
+        {"label": "v17 @ f=+1.0 (N=50)", "ar": 0.94, "delta_vs_baseline": +0.28,
+         "has_think": "0/50", "note": "⚠ thinking-suppression artifact — model stops emitting <think>"},
+        {"label": "v19 @ f=+1.0 (N=50)", "ar": 0.88, "delta_vs_baseline": +0.32,
+         "has_think": "0/50", "note": "⚠ same suppression artifact"},
+        {"label": "baseline (no steering, regraded)", "ar": 0.66, "delta_vs_baseline": 0.0,
+         "has_think": "50/50", "note": "true baseline post-regrade (was 0.54 pre-regrade)"},
+    ],
+    "open": [
+        "E9 benign regression on f=+0.7 / f=+0.3 (load-bearing for capability claim)",
+        "DiffMean L20 regrade DONE — α=−15 stays at AR 0.667 (judge-stable). L20 mandate confirmed (range 0.334 vs L24 0.100, L16 0.134).",
+        "v22 multi-concept eval landed; G1 broad-concept hypernet queued after v22",
+        "Comparison caveat: qwen3-baseline cell used max_tokens=384 (greedy) which inflates AR via no-tool-call fallback; use v17_f0 (NEW=0.66, max_tokens=2048) for HyperSteer baseline.",
+    ],
 }
 
 # Pre-CHAT_MODELS-fix runs: invalid because no system prompt / tool defs were sent.
@@ -409,7 +444,7 @@ def _load_jsonl(path: pathlib.Path) -> list:
 
 # ---------- HyperSteer artifact discovery ----------
 
-_VARIANT_RE = re.compile(r"\b(v\d+)\b", re.IGNORECASE)
+_VARIANT_RE = re.compile(r"(?<![a-zA-Z0-9])(v\d+)(?![a-zA-Z0-9])", re.IGNORECASE)
 _FACTOR_RE = re.compile(r"_f(\d+)(?:p(\d+))?", re.IGNORECASE)
 _TRAIN_DIR_RE = re.compile(r"^mcp_hsteer_(?:9b|qwen3_8b)_(.+)$", re.IGNORECASE)
 
@@ -621,6 +656,271 @@ HSTEER_TRAIN = _discover_train_dirs()
 HSTEER_RUNS = _discover_eval_runs()
 
 
+# ---------- Methods index (HyperSteer + DiffMean + ReFT, grouped by method) ----------
+
+_DIFFMEAN_EVAL_ROOT = ROOT / "outputs" / "eval"
+_ALPHA_RE = re.compile(r"alpha_(n?)(\d+)(?:p(\d+))?", re.IGNORECASE)
+
+
+def _parse_alpha(name: str) -> float | None:
+    m = _ALPHA_RE.search(name)
+    if not m:
+        return None
+    sign = -1 if m.group(1).lower() == "n" else 1
+    whole = int(m.group(2))
+    frac = m.group(3)
+    val = float(f"{whole}.{frac}") if frac else float(whole)
+    return sign * val
+
+
+def _summarise_results_jsonl(rf: pathlib.Path) -> dict:
+    """Compute new-judge AR (preferring results_regraded.jsonl) + n + has_think pct + truncation."""
+    if not rf.exists():
+        return {"n": 0}
+    rg = rf.parent / "results_regraded.jsonl"
+    new_ar_by_eid: dict = {}
+    if rg.exists():
+        for ln in rg.read_text().splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                rr = json.loads(ln)
+            except Exception:
+                continue
+            eid = rr.get("example_id") if rr.get("example_id") is not None else rr.get("case_id")
+            if rr.get("new_ar") is not None:
+                new_ar_by_eid[eid] = rr["new_ar"]
+    n = 0
+    ar_sum = 0.0
+    old_ar_sum = 0.0
+    has_old_ar = False
+    has_think_n = 0
+    truncated_n = 0
+    for idx, ln in enumerate(rf.read_text().splitlines()):
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        n += 1
+        eid = r.get("example_id") if r.get("example_id") is not None else r.get("case_id")
+        if eid is None:
+            eid = idx
+        # old AR — try multiple shapes
+        old_ar = None
+        if isinstance(r.get("judge"), dict):
+            old_ar = r["judge"].get("attack_resistance")
+        if old_ar is None:
+            old_ar = r.get("attack_resistance")
+        if old_ar is None:
+            old_ar = (r.get("metrics") or {}).get("attack_resistance")
+        if old_ar is not None:
+            has_old_ar = True
+            old_ar_sum += float(old_ar)
+        ar = new_ar_by_eid.get(eid, old_ar if old_ar is not None else 0.0)
+        ar_sum += float(ar)
+        # has_think — works for both schemas
+        comp = r.get("completion")
+        if isinstance(comp, list) and comp and isinstance(comp[-1], dict):
+            text = comp[-1].get("content", "") or ""
+        elif isinstance(comp, str):
+            text = comp
+        else:
+            text = ""
+        if "<think>" in text:
+            has_think_n += 1
+        if r.get("is_truncated"):
+            truncated_n += 1
+    return {
+        "n": n,
+        "ar_new": ar_sum / n if n else None,
+        "ar_old": (old_ar_sum / n) if (n and has_old_ar) else None,
+        "regraded_n": len(new_ar_by_eid),
+        "has_think_pct": (has_think_n / n) if n else None,
+        "truncated_n": truncated_n,
+    }
+
+
+def _summarise_train_data(parquet_path: pathlib.Path) -> dict:
+    """Quick stats on the training parquet so the Methods view can show data ↔ results relationships."""
+    if not parquet_path.exists():
+        return {}
+    try:
+        import pandas as pd  # type: ignore
+    except ImportError:
+        return {"_error": "pandas not installed"}
+    try:
+        df = pd.read_parquet(parquet_path)
+    except Exception as e:
+        return {"_error": str(e)}
+    n = len(df)
+    n_concepts = int(df["concept_id"].nunique()) if "concept_id" in df.columns else None
+    cat = df["category"].value_counts().to_dict() if "category" in df.columns else {}
+    pos = df[df["category"] == "positive"] if "category" in df.columns else df
+    pos_outs = pos["output"].astype(str) if "output" in df.columns else pd.Series([], dtype=str)
+    has_think_n = int(pos_outs.str.contains(r"<think>", regex=True).sum()) if len(pos_outs) else 0
+    avg_pos_len = int(pos_outs.str.len().mean()) if len(pos_outs) else 0
+    concept_text = ""
+    if "output_concept" in df.columns and len(pos):
+        concept_text = str(pos.iloc[0]["output_concept"])[:600]
+    sample_pos_input = str(pos.iloc[0]["input"])[:1500] if "input" in df.columns and len(pos) else ""
+    sample_pos_output = str(pos.iloc[0]["output"])[:1500] if "output" in df.columns and len(pos) else ""
+    return {
+        "rows": n,
+        "n_concepts": n_concepts,
+        "n_positive": int(cat.get("positive", 0)),
+        "n_negative": int(cat.get("negative", 0)),
+        "pos_with_think": has_think_n,
+        "pos_with_think_pct": (has_think_n / max(len(pos_outs), 1)) if len(pos_outs) else 0.0,
+        "avg_pos_output_len": avg_pos_len,
+        "concept_text": concept_text,
+        "sample_pos_input": sample_pos_input,
+        "sample_pos_output": sample_pos_output,
+    }
+
+
+def _train_dir_for_variant(variant: str) -> dict | None:
+    """Best-effort match an eval run's variant ('v17','v22',...) to one of the training dirs."""
+    if not variant:
+        return None
+    # Prefer exact match on the variant suffix in the dir name
+    for t in HSTEER_TRAIN:
+        if t.get("variant") == variant.lower():
+            return t
+    return None
+
+
+# Pre-compute training-data summaries (one per training dir; ~141 rows each so cheap)
+TRAIN_DATA_SUMMARIES: dict = {}
+for _t in HSTEER_TRAIN:
+    pq = pathlib.Path(_t["_paths"]["parquet"])
+    TRAIN_DATA_SUMMARIES[_t["name"]] = _summarise_train_data(pq)
+
+
+def _build_methods_index() -> dict:
+    """Group every eval cell into methods. Each cell carries (label, hyperparam_name, hyperparam_value, AR, n, leaf).
+    Each run shows ΔAR = max(AR) - min(AR) across its cells (the 'varies' signal).
+    HyperSteer runs are augmented with `training` summary so the UI can show data ↔ results."""
+    methods = {"HyperSteer": [], "DiffMean": [], "ReFT": []}
+
+    # --- HyperSteer (axbench/outputs/eval/vfeval_n*) ---
+    for r in HSTEER_RUNS:
+        cells = []
+        for c in r["configs"]:
+            if not c.get("leaf"):
+                continue
+            leaf = pathlib.Path(c["leaf"])
+            stats = _summarise_results_jsonl(leaf / "results.jsonl")
+            cells.append({
+                "label": c.get("tag"),
+                "variant": c.get("variant"),
+                "hyperparam_name": "factor",
+                "hyperparam_value": c.get("factor"),
+                "ar_new": stats.get("ar_new"),
+                "ar_old": stats.get("ar_old"),
+                "regraded_n": stats.get("regraded_n", 0),
+                "has_think_pct": stats.get("has_think_pct"),
+                "truncated_n": stats.get("truncated_n"),
+                "n": stats.get("n"),
+                "max_tokens": c.get("max_tokens"),
+                "leaf": str(leaf),
+            })
+        ars = [c["ar_new"] for c in cells if c.get("ar_new") is not None]
+        delta = (max(ars) - min(ars)) if len(ars) >= 2 else 0.0
+        # Attach training-data summary by matching the run's variant to a training dir
+        run_variant = None
+        for c in cells:
+            if c.get("variant"):
+                run_variant = c["variant"]; break
+        train = _train_dir_for_variant(run_variant) if run_variant else None
+        train_summary = TRAIN_DATA_SUMMARIES.get(train["name"]) if train else None
+        train_info = None
+        if train and train_summary:
+            train_info = {
+                "name": train["name"],
+                "variant": train.get("variant"),
+                "variant_desc": train.get("variant_desc"),
+                "rows": train_summary.get("rows"),
+                "n_concepts": train_summary.get("n_concepts"),
+                "n_positive": train_summary.get("n_positive"),
+                "n_negative": train_summary.get("n_negative"),
+                "pos_with_think": train_summary.get("pos_with_think"),
+                "pos_with_think_pct": train_summary.get("pos_with_think_pct"),
+                "avg_pos_output_len": train_summary.get("avg_pos_output_len"),
+                "concept_text": train_summary.get("concept_text"),
+                "sample_pos_input": train_summary.get("sample_pos_input"),
+                "sample_pos_output": train_summary.get("sample_pos_output"),
+            }
+        methods["HyperSteer"].append({
+            "method": "HyperSteer",
+            "run": r["run"],
+            "invalid_reason": r.get("invalid_reason"),
+            "n_cells": len(cells),
+            "delta_ar": delta,
+            "cells": cells,
+            "variant": run_variant,
+            "training": train_info,
+        })
+
+    # --- DiffMean (diffmean/outputs/eval/<sweep>/[Lxx/]alpha_*) ---
+    if _DIFFMEAN_EVAL_ROOT.exists():
+        # Each "run" = a sweep dir (e.g. layer_axis_allt_v2/L20). Each cell = an alpha bucket.
+        # Group by parent dir of any results.jsonl that contains an alpha_* in its path.
+        run_buckets: dict = {}
+        for rf in _DIFFMEAN_EVAL_ROOT.rglob("results.jsonl"):
+            parts = rf.relative_to(_DIFFMEAN_EVAL_ROOT).parts
+            # Find the alpha segment
+            alpha_idx = None
+            for i, p in enumerate(parts):
+                if _ALPHA_RE.search(p):
+                    alpha_idx = i
+                    break
+            if alpha_idx is None:
+                continue
+            run_key = "/".join(parts[:alpha_idx])  # e.g. "layer_axis_allt_v2/L20"
+            cell_label = parts[alpha_idx]
+            run_buckets.setdefault(run_key, []).append((cell_label, rf))
+        for run_key in sorted(run_buckets):
+            cells = []
+            for cell_label, rf in sorted(run_buckets[run_key]):
+                stats = _summarise_results_jsonl(rf)
+                cells.append({
+                    "label": cell_label,
+                    "variant": None,
+                    "hyperparam_name": "alpha",
+                    "hyperparam_value": _parse_alpha(cell_label),
+                    "ar_new": stats.get("ar_new"),
+                    "ar_old": stats.get("ar_old"),
+                    "regraded_n": stats.get("regraded_n", 0),
+                    "has_think_pct": stats.get("has_think_pct"),
+                    "truncated_n": stats.get("truncated_n"),
+                    "n": stats.get("n"),
+                    "max_tokens": None,
+                    "leaf": str(rf.parent),
+                })
+            ars = [c["ar_new"] for c in cells if c.get("ar_new") is not None]
+            delta = (max(ars) - min(ars)) if len(ars) >= 2 else 0.0
+            methods["DiffMean"].append({
+                "method": "DiffMean",
+                "run": run_key,
+                "invalid_reason": None,
+                "n_cells": len(cells),
+                "delta_ar": delta,
+                "cells": cells,
+            })
+
+    # --- ReFT placeholder (D4a/D4b queued, no runs yet) ---
+    # When ReFT runs land they will appear under axbench/outputs/eval/reft_* — discover them then.
+
+    return methods
+
+
+METHODS = _build_methods_index()
+
+
 def _hsteer_runs_index_lite() -> list[dict]:
     """Trimmed-down view (no per-row data) for client-side rendering."""
     out = []
@@ -691,12 +991,27 @@ def _find_train(name: str) -> dict | None:
 
 
 def _read_results_examples(leaf: pathlib.Path) -> list[dict]:
-    """Read results.jsonl, return one trimmed entry per row (no full prompt/completion)."""
+    """Read results.jsonl, return one trimmed entry per row. Overlays results_regraded.jsonl
+    (new-judge AR) when present, keeping old-judge `attack_resistance` as `old_attack_resistance`."""
     rf = leaf / "results.jsonl"
     if not rf.exists():
         return []
+    # Build new-judge AR map keyed by example_id when regraded file exists.
+    rg = leaf / "results_regraded.jsonl"
+    new_ar_by_eid: dict = {}
+    if rg.exists():
+        for ln in rg.read_text().splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                rr = json.loads(ln)
+            except Exception:
+                continue
+            eid = rr.get("example_id") if rr.get("example_id") is not None else rr.get("case_id")
+            new_ar_by_eid[eid] = {"new_ar": rr.get("new_ar"), "grade": rr.get("grade") or rr.get("new_grade")}
     out = []
-    for ln in rf.read_text().splitlines():
+    for idx, ln in enumerate(rf.read_text().splitlines()):
         ln = ln.strip()
         if not ln:
             continue
@@ -717,34 +1032,60 @@ def _read_results_examples(leaf: pathlib.Path) -> list[dict]:
             for m in comp:
                 if isinstance(m, dict):
                     comp_len += len(m.get("content") or "")
+        old_ar = (r.get("metrics") or {}).get("attack_resistance")
+        if old_ar is None:
+            old_ar = r.get("attack_resistance")
+        eid = r.get("example_id") if r.get("example_id") is not None else r.get("case_id")
+        if eid is None:
+            eid = idx
+        regrade = new_ar_by_eid.get(eid)
+        ar = regrade["new_ar"] if (regrade and regrade.get("new_ar") is not None) else old_ar
         out.append({
-            "example_id": r.get("example_id"),
+            "example_id": eid,
             "user_query": user_q[:300],
             "user_query_len": len(user_q),
             "completion_len": comp_len,
             "reward": r.get("reward"),
-            "attack_resistance": (r.get("metrics") or {}).get("attack_resistance"),
+            "attack_resistance": ar,
+            "old_attack_resistance": old_ar,
+            "regraded": regrade is not None,
+            "regrade_grade": regrade["grade"] if regrade else None,
             "attack_detected": (r.get("metrics") or {}).get("attack_detected"),
             "is_truncated": r.get("is_truncated"),
             "stop_condition": r.get("stop_condition"),
-            "security_risk": info.get("security_risk"),
-            "server": info.get("server_name") or info.get("server"),
-            "paradigm": info.get("paradigm"),
-            "data_id": info.get("data_id"),
+            "security_risk": info.get("security_risk") or (r.get("tags") or {}).get("security_risk"),
+            "server": info.get("server_name") or info.get("server") or (r.get("tags") or {}).get("server"),
+            "paradigm": info.get("paradigm") or (r.get("tags") or {}).get("paradigm"),
+            "data_id": info.get("data_id") or (r.get("extra") or {}).get("data_id"),
         })
     return out
 
 
 def _read_results_full(leaf: pathlib.Path, example_id) -> dict | None:
-    """Find one row by example_id (or by index if no example_id) and return everything."""
+    """Find one row by example_id (vf-eval int) or case_id (DiffMean string) and return
+    everything. Attaches `_regrade` field with new-judge grade/AR when present."""
     rf = leaf / "results.jsonl"
     if not rf.exists():
         return None
-    target = None
+    # Accept either int (vf-eval example_id) or string (DiffMean case_id, or stringified int).
+    target_str = str(example_id) if example_id is not None else None
     try:
-        target = int(example_id)
+        target_int = int(example_id)
     except (TypeError, ValueError):
-        return None
+        target_int = None
+    rg = leaf / "results_regraded.jsonl"
+    regrade_by_eid: dict = {}
+    if rg.exists():
+        for ln in rg.read_text().splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                rr = json.loads(ln)
+            except Exception:
+                continue
+            eid = rr.get("example_id") if rr.get("example_id") is not None else rr.get("case_id")
+            regrade_by_eid[eid] = rr
     for idx, ln in enumerate(rf.read_text().splitlines()):
         ln = ln.strip()
         if not ln:
@@ -753,10 +1094,14 @@ def _read_results_full(leaf: pathlib.Path, example_id) -> dict | None:
             r = json.loads(ln)
         except Exception:
             continue
-        eid = r.get("example_id")
+        eid = r.get("example_id") if r.get("example_id") is not None else r.get("case_id")
         if eid is None:
             eid = idx
-        if eid == target:
+        # Match against int form (HyperSteer) OR string form (DiffMean case_id) OR fallback by str equality
+        matched = (eid == target_int) or (str(eid) == target_str)
+        if matched:
+            if eid in regrade_by_eid:
+                r["_regrade"] = regrade_by_eid[eid]
             return r
     return None
 
@@ -882,7 +1227,7 @@ HTML = r"""<!DOCTYPE html>
   .no-results { padding: 40px; text-align: center; color: #444; }
 
   /* stats / sweeps / rollouts / stability / highlights / hsteer pages — block flow + vertical scroll, no flex clipping */
-  #statsPage.active, #sweepsPage.active, #rolloutsPage.active, #stabilityPage.active, #highlightsPage.active, #hsteerPage.active {
+  #statsPage.active, #sweepsPage.active, #rolloutsPage.active, #stabilityPage.active, #highlightsPage.active, #hsteerPage.active, #methodsPage.active {
     display: block !important;
     padding: 16px;
     overflow-y: auto;
@@ -910,6 +1255,21 @@ HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+<div id="headlinesBanner" style="background:linear-gradient(90deg,#1a2d3d,#2a1d3d);border-bottom:1px solid #3a3a4a;padding:8px 16px;font-size:0.78rem;color:#cdd;">
+  <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;">
+    <span style="font-weight:600;color:#fbbf24;">★ Headlines</span>
+    <span id="headlinesAsOf" style="color:#888;font-size:0.7rem;"></span>
+    <span id="headlinesTag" style="flex:1;min-width:200px;"></span>
+    <button onclick="document.getElementById('headlinesDetail').style.display=document.getElementById('headlinesDetail').style.display==='none'?'block':'none'"
+            style="background:transparent;border:1px solid #555;color:#aaa;padding:2px 10px;border-radius:4px;cursor:pointer;font-size:0.7rem;">expand ▾</button>
+  </div>
+  <div id="headlinesDetail" style="display:none;margin-top:10px;border-top:1px solid #3a3a4a;padding-top:10px;">
+    <table id="headlinesTable" style="width:100%;border-collapse:collapse;font-size:0.75rem;"></table>
+    <div style="margin-top:8px;color:#999;font-size:0.7rem;">
+      <strong style="color:#bbb;">Open:</strong> <span id="headlinesOpen"></span>
+    </div>
+  </div>
+</div>
 <header>
   <h1>MCPTox</h1>
   <div class="tabs">
@@ -919,6 +1279,7 @@ HTML = r"""<!DOCTYPE html>
     <div class="tab" data-tab="rollouts" style="border-color:#fbbf24;color:#fbbf24;">⚠ Rollouts <span id="rolBadge" style="margin-left:4px;background:#fbbf24;color:#1a1a24;border-radius:8px;padding:1px 7px;font-size:0.65rem;font-weight:700;"></span></div>
     <div class="tab" data-tab="stability">Stability</div>
     <div class="tab" data-tab="highlights">Highlights <span id="hlBadge" style="margin-left:4px;background:#3a2060;border-radius:8px;padding:0 6px;font-size:0.65rem;"></span></div>
+    <div class="tab" data-tab="methods" style="border-color:#fbbf24;color:#fbbf24;">★ Methods <span id="methodsBadge" style="margin-left:4px;background:#3a2a10;color:#fbbf24;border-radius:8px;padding:0 6px;font-size:0.65rem;"></span></div>
     <div class="tab" data-tab="hsteer" style="border-color:#60a5fa;color:#60a5fa;">HyperSteer <span id="hsBadge" style="margin-left:4px;background:#1a2d3d;color:#60a5fa;border-radius:8px;padding:0 6px;font-size:0.65rem;"></span></div>
   </div>
   <div class="filters" id="browseFilters">
@@ -947,6 +1308,7 @@ HTML = r"""<!DOCTYPE html>
 <div id="rolloutsPage" class="page"></div>
 <div id="stabilityPage" class="page"></div>
 <div id="highlightsPage" class="page"></div>
+<div id="methodsPage" class="page"></div>
 <div id="hsteerPage" class="page"></div>
 
 <script>
@@ -963,7 +1325,34 @@ let BORDER_LOG    = __BORDER_LOG__;
 let HSTEER_RUNS   = __HSTEER_RUNS__;
 let HSTEER_TRAIN  = __HSTEER_TRAIN__;
 let HSTEER_VARIANT_KEY = __HSTEER_VARIANT_KEY__;
+let HEADLINES = __HEADLINES__;
 let ROW_BY_ID     = Object.fromEntries(ROWS.map(r => [r.id, r]));
+
+// Render headlines banner (top of page, post-regrade summary)
+(function renderHeadlines() {
+  if (!HEADLINES || !HEADLINES.rows) return;
+  document.getElementById('headlinesAsOf').textContent = '(' + (HEADLINES.as_of || '') + ')';
+  document.getElementById('headlinesTag').textContent = HEADLINES.tagline || '';
+  const tbl = document.getElementById('headlinesTable');
+  tbl.innerHTML = '<thead><tr style="text-align:left;color:#888;border-bottom:1px solid #333;">' +
+    '<th style="padding:4px 8px;">cell</th><th style="padding:4px 8px;">AR</th>' +
+    '<th style="padding:4px 8px;">Δ vs baseline</th><th style="padding:4px 8px;">has_think</th>' +
+    '<th style="padding:4px 8px;">note</th></tr></thead><tbody>' +
+    HEADLINES.rows.map(r => {
+      const ar = r.ar != null ? r.ar.toFixed(3) : '—';
+      const d = r.delta_vs_baseline;
+      const dStr = d == null ? '' : (d > 0 ? '+' : '') + d.toFixed(2);
+      const dColor = d == null ? '#888' : (d > 0.10 ? '#6ee7b7' : (d < 0 ? '#fca5a5' : '#aaa'));
+      return '<tr style="border-bottom:1px solid #2a2a3a;">' +
+        '<td style="padding:4px 8px;color:#cdd;">' + r.label + '</td>' +
+        '<td style="padding:4px 8px;color:#fbbf24;font-weight:600;">' + ar + '</td>' +
+        '<td style="padding:4px 8px;color:' + dColor + ';">' + dStr + '</td>' +
+        '<td style="padding:4px 8px;color:#aaa;">' + (r.has_think || '') + '</td>' +
+        '<td style="padding:4px 8px;color:#999;font-size:0.72rem;">' + (r.note || '') + '</td>' +
+      '</tr>';
+    }).join('') + '</tbody>';
+  document.getElementById('headlinesOpen').textContent = (HEADLINES.open || []).join(' · ');
+})();
 
 let filtered = ROWS;
 let selectedId = null;
@@ -1865,6 +2254,311 @@ function renderHighlights() {
   </div>`;
 }
 
+/* ----- Methods tab (HyperSteer + DiffMean + ReFT, grouped, with varies filter) ----- */
+let METHODS = __METHODS__;
+let M_STATE = {
+  selected: 'HyperSteer',
+  variesOnly: true,         // default: show only runs where AR moved across cells
+  variesThreshold: 0.05,    // ΔAR > 5pp counts as "varied"
+  expandedRuns: new Set(),  // run names currently expanded
+  inspecting: null,         // {leaf, eid}
+};
+
+function mFmt(v, d=3) { return v == null ? '—' : v.toFixed(d); }
+function mDeltaColor(d) {
+  if (d == null) return '#666';
+  if (d >= 0.20) return '#6ee7b7';
+  if (d >= 0.10) return '#facc15';
+  if (d >= 0.05) return '#fbbf24';
+  return '#888';
+}
+
+function renderMethods() {
+  const cont = document.getElementById('methodsPage');
+  if (!cont) return;
+  const tabs = ['HyperSteer','DiffMean','ReFT'];
+  const counts = Object.fromEntries(tabs.map(t => [t, (METHODS[t]||[]).length]));
+  const variedCount = Object.fromEntries(tabs.map(t => [t, (METHODS[t]||[]).filter(r => r.delta_ar >= M_STATE.variesThreshold).length]));
+  document.getElementById('methodsBadge').textContent = (METHODS['HyperSteer']||[]).length + (METHODS['DiffMean']||[]).length;
+
+  cont.innerHTML = `
+  <div style="max-width:1200px;margin:0 auto;padding:14px 18px;">
+    <h2 style="font-size:1rem;color:#fbbf24;margin-bottom:6px;">Methods comparison</h2>
+    <div style="font-size:0.74rem;color:#888;margin-bottom:14px;">
+      Each method's runs (HyperSteer / DiffMean / ReFT). Each run shows its hyperparameter sweep + ΔAR (max−min across cells).
+      Click a run to see per-cell numbers; click a cell to inspect each example.
+      AR is post-regrade where regraded files exist (overlay shown on rows).
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:12px;">
+      ${tabs.map(t => `
+        <button onclick="mSelectMethod('${t}')"
+                style="background:${M_STATE.selected===t?'#3a2a10':'#1a1a24'};border:1px solid ${M_STATE.selected===t?'#fbbf24':'#3a3a4a'};color:${M_STATE.selected===t?'#fbbf24':'#aaa'};padding:6px 14px;border-radius:5px;font-size:0.78rem;cursor:pointer;font-weight:${M_STATE.selected===t?'600':'400'};">
+          ${t} <span style="opacity:0.6;font-size:0.7rem;">${counts[t]||0}</span>
+        </button>
+      `).join('')}
+      <span style="flex:1;"></span>
+      <label style="font-size:0.74rem;color:#aaa;cursor:pointer;">
+        <input type="checkbox" id="mVariesChk" ${M_STATE.variesOnly?'checked':''} onchange="mToggleVaries()" style="vertical-align:middle;"> only runs that varied (ΔAR ≥ ${M_STATE.variesThreshold.toFixed(2)})
+      </label>
+      <input type="number" step="0.01" min="0" max="1" value="${M_STATE.variesThreshold}" onchange="mSetThreshold(this.value)" style="width:60px;background:#252535;border:1px solid #3a3a4a;color:#cdd;padding:3px 5px;border-radius:3px;font-size:0.72rem;">
+    </div>
+    <div id="methodsTable"></div>
+  </div>`;
+  renderMethodsTable();
+}
+
+function renderMethodsTable() {
+  const sel = M_STATE.selected;
+  const runs = (METHODS[sel] || []);
+  const filtered = M_STATE.variesOnly ? runs.filter(r => r.delta_ar >= M_STATE.variesThreshold) : runs;
+  const tbl = document.getElementById('methodsTable');
+  if (!tbl) return;
+  if (filtered.length === 0) {
+    tbl.innerHTML = `<div style="color:#777;font-size:0.78rem;padding:30px;text-align:center;">${runs.length === 0 ? `No ${sel} runs discovered.` : `No runs with ΔAR ≥ ${M_STATE.variesThreshold.toFixed(2)} (uncheck filter to see all ${runs.length}).`}</div>`;
+    return;
+  }
+  // Sort by ΔAR descending
+  filtered.sort((a,b) => (b.delta_ar||0) - (a.delta_ar||0));
+  tbl.innerHTML = filtered.map(r => {
+    const isExpanded = M_STATE.expandedRuns.has(r.run);
+    const bestAR = Math.max(...r.cells.map(c => c.ar_new ?? -1));
+    const bestCell = r.cells.find(c => c.ar_new === bestAR);
+    const baseCell = r.cells.find(c => c.hyperparam_value === 0 || c.hyperparam_value == null && /baseline|f0/.test(c.label||''));
+    const baseAR = baseCell?.ar_new;
+    return `
+    <div style="margin-bottom:10px;border:1px solid #2a2a3a;border-radius:6px;background:#16161e;">
+      <div onclick="mToggleRun('${esc(r.run)}')" style="cursor:pointer;padding:10px 14px;display:flex;align-items:center;gap:14px;font-size:0.78rem;">
+        <span style="color:#888;width:14px;">${isExpanded?'▾':'▸'}</span>
+        <span style="color:${r.invalid_reason?'#fca5a5':'#cdd'};flex:1;font-family:monospace;${r.invalid_reason?'text-decoration:line-through;':''}">${esc(r.run)}</span>
+        <span style="color:#888;font-size:0.7rem;">${r.n_cells} cells</span>
+        <span style="color:${mDeltaColor(r.delta_ar)};font-weight:600;">ΔAR ${(r.delta_ar||0).toFixed(3)}</span>
+        <span style="color:#fbbf24;">best ${mFmt(bestAR)}</span>
+        ${baseAR != null ? `<span style="color:#888;font-size:0.7rem;">base ${mFmt(baseAR,2)}</span>` : ''}
+      </div>
+      ${isExpanded ? renderRunCells(r) : ''}
+    </div>`;
+  }).join('');
+}
+
+function renderRunCells(r) {
+  const baseCell = r.cells.find(c => c.hyperparam_value === 0 || (c.hyperparam_value == null && /baseline|f0/.test(c.label||'')));
+  const baseAR = baseCell?.ar_new;
+  const t = r.training;
+  const trainBlock = t ? `
+    <div style="background:#1c1c28;border:1px solid #2a2a3a;border-radius:5px;padding:8px 12px;margin-bottom:10px;font-size:0.72rem;">
+      <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;">
+        <span style="color:#fbbf24;font-weight:600;">training data → ${esc(t.name)}</span>
+        <span style="color:#888;">${t.rows} rows</span>
+        <span style="color:#888;">${t.n_concepts} concept${t.n_concepts===1?'':'s'}</span>
+        <span style="color:#888;">${t.n_positive} pos / ${t.n_negative} neg</span>
+        <span style="color:#888;">pos with &lt;think&gt;: ${t.pos_with_think}/${t.n_positive} (${Math.round((t.pos_with_think_pct||0)*100)}%)</span>
+        <span style="color:#888;">avg pos len: ${t.avg_pos_output_len}c</span>
+        <span style="flex:1;"></span>
+        <button onclick="event.stopPropagation();mShowTraining('${esc(t.name)}')" style="background:#252535;border:1px solid #fbbf24;color:#fbbf24;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:0.7rem;">view training data ▸</button>
+      </div>
+      ${t.variant_desc ? `<div style="color:#cdd;margin-top:6px;font-style:italic;">${esc(t.variant_desc)}</div>` : ''}
+      ${t.concept_text ? `<div style="margin-top:6px;color:#aaa;font-size:0.7rem;line-height:1.4;"><span style="color:#666;">concept_text:</span> ${esc(t.concept_text)}</div>` : ''}
+    </div>` : '';
+  return `<div style="border-top:1px solid #2a2a3a;padding:10px 14px;">${trainBlock}
+    <table style="width:100%;border-collapse:collapse;font-size:0.74rem;">
+      <thead><tr style="text-align:left;color:#888;border-bottom:1px solid #333;">
+        <th style="padding:4px 8px;">cell</th>
+        <th style="padding:4px 8px;text-align:right;">${r.cells[0]?.hyperparam_name || 'param'}</th>
+        <th style="padding:4px 8px;text-align:right;">AR (new)</th>
+        <th style="padding:4px 8px;text-align:right;">AR (old)</th>
+        <th style="padding:4px 8px;text-align:right;">Δ vs base</th>
+        <th style="padding:4px 8px;text-align:right;">has_think</th>
+        <th style="padding:4px 8px;text-align:right;">n</th>
+        <th style="padding:4px 8px;text-align:right;">max_tok</th>
+      </tr></thead>
+      <tbody>
+        ${r.cells.map(c => {
+          const dvs = (c.ar_new!=null && baseAR!=null) ? c.ar_new - baseAR : null;
+          const dvsColor = dvs == null ? '#666' : (dvs > 0.05 ? '#6ee7b7' : (dvs < -0.05 ? '#fca5a5' : '#888'));
+          const dvsStr = dvs == null ? '' : (dvs>0?'+':'') + dvs.toFixed(3);
+          const thinkPct = c.has_think_pct == null ? '' : Math.round(c.has_think_pct * 100) + '%';
+          const thinkColor = c.has_think_pct == null ? '#666' : (c.has_think_pct < 0.5 ? '#fca5a5' : '#888');
+          return `<tr onclick="mInspectCell('${esc(c.leaf)}')" style="cursor:pointer;border-bottom:1px solid #232330;" onmouseover="this.style.background='#1c1c28'" onmouseout="this.style.background='transparent'">
+            <td style="padding:4px 8px;color:#cdd;font-family:monospace;font-size:0.72rem;">${esc(c.label||'')}</td>
+            <td style="padding:4px 8px;text-align:right;color:#aaa;">${c.hyperparam_value!=null ? c.hyperparam_value : '—'}</td>
+            <td style="padding:4px 8px;text-align:right;color:#fbbf24;font-weight:600;">${mFmt(c.ar_new)}</td>
+            <td style="padding:4px 8px;text-align:right;color:#666;">${mFmt(c.ar_old)}${c.regraded_n>0?` <span style="color:#6ee7b7;font-size:0.65rem;">(rg ${c.regraded_n})</span>`:''}</td>
+            <td style="padding:4px 8px;text-align:right;color:${dvsColor};">${dvsStr}</td>
+            <td style="padding:4px 8px;text-align:right;color:${thinkColor};">${thinkPct}</td>
+            <td style="padding:4px 8px;text-align:right;color:#666;">${c.n||'—'}</td>
+            <td style="padding:4px 8px;text-align:right;color:#666;">${c.max_tokens||'—'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    ${r.invalid_reason ? `<div style="color:#fca5a5;font-size:0.7rem;margin-top:8px;">⚠ ${esc(r.invalid_reason)}</div>` : ''}
+  </div>`;
+}
+
+function mSelectMethod(m) { M_STATE.selected = m; M_STATE.expandedRuns = new Set(); renderMethods(); }
+function mToggleVaries() { M_STATE.variesOnly = document.getElementById('mVariesChk').checked; renderMethodsTable(); }
+function mSetThreshold(v) { M_STATE.variesThreshold = parseFloat(v) || 0; renderMethods(); }
+function mToggleRun(run) {
+  if (M_STATE.expandedRuns.has(run)) M_STATE.expandedRuns.delete(run);
+  else M_STATE.expandedRuns.add(run);
+  renderMethodsTable();
+}
+function mInspectCell(leaf) {
+  // Open per-example inspector overlay
+  fetch('/api/methods/cell?leaf=' + encodeURIComponent(leaf))
+    .then(r => r.json())
+    .then(rows => mShowInspector(leaf, rows));
+}
+function mShowInspector(leaf, rows) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:1000;overflow:auto;padding:30px;';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  const cellName = leaf.split('/').slice(-3).join('/');
+  overlay.innerHTML = `
+    <div style="max-width:1200px;margin:0 auto;background:#1a1a24;border-radius:8px;padding:20px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <h3 style="margin:0;color:#fbbf24;font-size:0.9rem;">Inspect cell: <span style="color:#cdd;font-family:monospace;font-size:0.78rem;">${esc(cellName)}</span></h3>
+        <button onclick="this.closest('div[style*=fixed]').remove()" style="background:#252535;border:1px solid #3a3a4a;color:#aaa;padding:5px 12px;border-radius:5px;cursor:pointer;font-size:0.74rem;">close ✕</button>
+      </div>
+      <div style="font-size:0.72rem;color:#888;margin-bottom:10px;">${rows.length} examples · click row to expand completion</div>
+      <table style="width:100%;border-collapse:collapse;font-size:0.74rem;">
+        <thead><tr style="text-align:left;color:#888;border-bottom:1px solid #333;">
+          <th style="padding:5px;">eid</th>
+          <th style="padding:5px;">query</th>
+          <th style="padding:5px;text-align:right;">AR new</th>
+          <th style="padding:5px;text-align:right;">AR old</th>
+          <th style="padding:5px;">grade</th>
+          <th style="padding:5px;text-align:right;">comp_len</th>
+          <th style="padding:5px;">tags</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(r => `
+          <tr onclick="mFetchExample('${esc(leaf)}', '${esc(String(r.example_id))}', this)"
+              style="cursor:pointer;border-bottom:1px solid #232330;" onmouseover="this.style.background='#1c1c28'" onmouseout="this.style.background='transparent'">
+            <td style="padding:5px;color:#aaa;">${esc(String(r.example_id))}</td>
+            <td style="padding:5px;color:#cdd;font-size:0.7rem;">${esc((r.user_query||'').slice(0,80))}${(r.user_query||'').length>80?'…':''}</td>
+            <td style="padding:5px;text-align:right;color:#fbbf24;font-weight:600;">${mFmt(r.attack_resistance,2)}</td>
+            <td style="padding:5px;text-align:right;color:#666;">${mFmt(r.old_attack_resistance,2)}</td>
+            <td style="padding:5px;color:${r.regrade_grade==='A'?'#6ee7b7':(r.regrade_grade==='B'?'#fca5a5':'#888')};">${esc(r.regrade_grade||'')}</td>
+            <td style="padding:5px;text-align:right;color:#666;">${r.completion_len||'—'}</td>
+            <td style="padding:5px;color:#888;font-size:0.7rem;">${esc([r.security_risk,r.paradigm].filter(x=>x).join(' · '))}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+function mShowTraining(name) {
+  // Open an overlay showing training data summary + parquet sample + yaml config
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:1000;overflow:auto;padding:30px;';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `<div style="max-width:1200px;margin:0 auto;background:#1a1a24;border-radius:8px;padding:20px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;color:#fbbf24;font-size:0.9rem;">Training data: <span style="color:#cdd;font-family:monospace;font-size:0.78rem;">${esc(name)}</span></h3>
+      <button onclick="this.closest('div[style*=fixed]').remove()" style="background:#252535;border:1px solid #3a3a4a;color:#aaa;padding:5px 12px;border-radius:5px;cursor:pointer;font-size:0.74rem;">close ✕</button>
+    </div>
+    <div id="trainOverlayBody" style="font-size:0.74rem;color:#888;">loading…</div>
+  </div>`;
+  document.body.appendChild(overlay);
+  Promise.all([
+    fetch('/api/hsteer/parquet?train=' + encodeURIComponent(name)).then(r => r.json()),
+    fetch('/api/hsteer/yaml?train=' + encodeURIComponent(name)).then(r => r.text()),
+  ]).then(([parq, yamlText]) => {
+    const body = document.getElementById('trainOverlayBody');
+    if (!parq.ok && parq.error) {
+      body.innerHTML = `<div style="color:#fca5a5;">Error loading parquet: ${esc(parq.error)}</div>`;
+      return;
+    }
+    const rows = parq.rows || [];
+    body.innerHTML = `
+      <div style="display:flex;gap:14px;margin-bottom:14px;flex-wrap:wrap;">
+        <div style="background:#1c1c28;padding:8px 12px;border-radius:4px;">
+          <div style="color:#666;font-size:0.65rem;">total rows</div>
+          <div style="color:#cdd;font-size:0.85rem;font-weight:600;">${parq.total||rows.length}</div>
+        </div>
+        <div style="background:#1c1c28;padding:8px 12px;border-radius:4px;">
+          <div style="color:#666;font-size:0.65rem;">columns</div>
+          <div style="color:#cdd;font-size:0.7rem;">${(parq.columns||[]).join(', ')}</div>
+        </div>
+      </div>
+      <details style="margin-bottom:14px;"><summary style="color:#fbbf24;cursor:pointer;font-size:0.75rem;">YAML config</summary>
+        <pre style="white-space:pre-wrap;color:#cdd;background:#0d0d14;padding:10px;border-radius:4px;font-size:0.7rem;max-height:300px;overflow:auto;margin-top:6px;">${esc(yamlText)}</pre>
+      </details>
+      <h4 style="color:#cdd;font-size:0.78rem;margin-bottom:6px;">Sample rows (${rows.length} of ${parq.total||rows.length}, showing parquet contents directly)</h4>
+      <div style="display:flex;gap:6px;margin-bottom:8px;font-size:0.7rem;color:#888;">
+        <button onclick="mFilterTrain('all', this)" class="m-tfilter active" style="background:#3a2a10;border:1px solid #fbbf24;color:#fbbf24;padding:3px 10px;border-radius:4px;cursor:pointer;">all</button>
+        <button onclick="mFilterTrain('positive', this)" class="m-tfilter" style="background:#252535;border:1px solid #3a3a4a;color:#aaa;padding:3px 10px;border-radius:4px;cursor:pointer;">positive</button>
+        <button onclick="mFilterTrain('negative', this)" class="m-tfilter" style="background:#252535;border:1px solid #3a3a4a;color:#aaa;padding:3px 10px;border-radius:4px;cursor:pointer;">negative</button>
+      </div>
+      <div id="trainRowsList">
+        ${rows.map((row, i) => `
+          <div class="m-trainrow" data-cat="${esc(row.category||'')}" style="border:1px solid #2a2a3a;border-radius:4px;padding:8px 12px;margin-bottom:6px;background:#0d0d14;">
+            <div style="display:flex;gap:10px;font-size:0.65rem;color:#888;margin-bottom:4px;">
+              <span>row ${i}</span>
+              <span style="color:${row.category==='positive'?'#6ee7b7':'#fbbf24'};">${esc(row.category||'')}</span>
+              <span>concept_id=${esc(String(row.concept_id))}</span>
+              ${row.dataset_category ? `<span>${esc(row.dataset_category)}</span>` : ''}
+            </div>
+            <div style="color:#666;font-size:0.65rem;margin-top:6px;">INPUT (${(row.input||'').length} chars):</div>
+            <pre style="white-space:pre-wrap;color:#cdd;background:#1a1a24;padding:6px 8px;border-radius:3px;font-size:0.7rem;max-height:200px;overflow:auto;margin:2px 0;">${esc((row.input||'').slice(0,2000))}${(row.input||'').length>2000?'\n…':''}</pre>
+            <div style="color:#666;font-size:0.65rem;margin-top:6px;">OUTPUT (${(row.output||'').length} chars${(row.output||'').includes('<think>')?', has &lt;think&gt;':''}):</div>
+            <pre style="white-space:pre-wrap;color:#cdd;background:#1a1a24;padding:6px 8px;border-radius:3px;font-size:0.7rem;max-height:300px;overflow:auto;margin:2px 0;">${esc((row.output||'').slice(0,2000))}${(row.output||'').length>2000?'\n…':''}</pre>
+            ${row.output_concept ? `<div style="color:#666;font-size:0.65rem;margin-top:4px;">concept: <span style="color:#aaa;font-style:italic;">${esc((row.output_concept||'').slice(0,300))}</span></div>` : ''}
+          </div>`).join('')}
+      </div>`;
+  });
+}
+function mFilterTrain(cat, btn) {
+  document.querySelectorAll('.m-tfilter').forEach(b => {
+    b.classList.remove('active');
+    b.style.background = '#252535'; b.style.border = '1px solid #3a3a4a'; b.style.color = '#aaa';
+  });
+  btn.classList.add('active');
+  btn.style.background = '#3a2a10'; btn.style.border = '1px solid #fbbf24'; btn.style.color = '#fbbf24';
+  document.querySelectorAll('.m-trainrow').forEach(r => {
+    r.style.display = (cat === 'all' || r.dataset.cat === cat) ? '' : 'none';
+  });
+}
+
+function mFetchExample(leaf, eid, rowEl) {
+  // Toggle expansion under the clicked row
+  const next = rowEl.nextElementSibling;
+  if (next && next.classList.contains('m-example-detail')) {
+    next.remove();
+    return;
+  }
+  fetch('/api/methods/example?leaf=' + encodeURIComponent(leaf) + '&eid=' + encodeURIComponent(eid))
+    .then(r => r.json())
+    .then(full => {
+      const td = document.createElement('tr');
+      td.classList.add('m-example-detail');
+      const comp = full.completion;
+      let compText = '';
+      if (Array.isArray(comp) && comp.length) {
+        compText = (comp[comp.length-1] && comp[comp.length-1].content) || '';
+      } else if (typeof comp === 'string') {
+        compText = comp;
+      }
+      const sysPrompt = (full.prompt || []).find(p => p.role === 'system');
+      const sys = sysPrompt ? sysPrompt.content : (full.system_prompt || '');
+      const userQ = full.user_query || (full.info && full.info.query) || '';
+      const poison = (full.info && full.info.poisoned_tool) || (full.extra && full.extra.poisoned_tool) || '';
+      const rg = full._regrade;
+      td.innerHTML = `<td colspan="7" style="background:#0d0d14;padding:14px;">
+        <div style="font-size:0.72rem;color:#666;margin-bottom:6px;">USER QUERY:</div>
+        <div style="color:#cdd;background:#1a1a24;padding:8px;border-radius:4px;font-size:0.75rem;margin-bottom:10px;">${esc(userQ)}</div>
+        ${poison ? `<div style="font-size:0.72rem;color:#666;margin-bottom:6px;">POISONED TOOL:</div>
+          <details><summary style="color:#fca5a5;cursor:pointer;font-size:0.72rem;">show poisoned tool description (${poison.length} chars)</summary>
+          <pre style="white-space:pre-wrap;color:#fca5a5;background:#1a1a24;padding:8px;border-radius:4px;font-size:0.7rem;margin-top:4px;max-height:300px;overflow:auto;">${esc(poison)}</pre></details>` : ''}
+        <div style="font-size:0.72rem;color:#666;margin:10px 0 6px;">COMPLETION (${compText.length} chars):</div>
+        <pre style="white-space:pre-wrap;color:#cdd;background:#1a1a24;padding:8px;border-radius:4px;font-size:0.72rem;max-height:500px;overflow:auto;">${esc(compText)}</pre>
+        ${rg ? `<div style="font-size:0.72rem;color:#888;margin-top:8px;">Regrade: <span style="color:${rg.grade==='A'||rg.new_grade==='A'?'#6ee7b7':'#fca5a5'};">${esc(rg.grade||rg.new_grade||'?')}</span> · raw judge output: <code style="color:#aaa;">${esc(rg.raw||'')}</code></div>` : ''}
+      </td>`;
+      rowEl.parentNode.insertBefore(td, rowEl.nextSibling);
+    });
+}
+
 /* ----- HyperSteer tab ----- */
 let HS_VIEW = { kind: 'index' };  // {kind:'index'} | {kind:'run', run} | {kind:'example', run, tag, eid}
                                   // | {kind:'train', name} | {kind:'compare', eid}
@@ -2428,7 +3122,7 @@ document.querySelectorAll('.tab').forEach(t => {
   t.onclick = () => {
     document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
     const tab = t.dataset.tab;
-    ['browsePage','statsPage','sweepsPage','rolloutsPage','stabilityPage','highlightsPage','hsteerPage'].forEach(id => {
+    ['browsePage','statsPage','sweepsPage','rolloutsPage','stabilityPage','highlightsPage','hsteerPage','methodsPage'].forEach(id => {
       document.getElementById(id).classList.toggle('active', id === tab+'Page');
     });
     document.getElementById('browseFilters').style.display = tab === 'browse' ? '' : 'none';
@@ -2438,6 +3132,7 @@ document.querySelectorAll('.tab').forEach(t => {
     if (tab === 'stability') renderStability();
     if (tab === 'highlights') renderHighlights();
     if (tab === 'hsteer') hsGo(HS_VIEW || {kind:'index'});
+    if (tab === 'methods') renderMethods();
   };
 });
 
@@ -2574,6 +3269,7 @@ def _rebuild_globals():
     """Re-read every input file and rebuild the cached globals."""
     global ROWS, BY_PAIR, BY_SWEEP_ALPHA, AUTO_SWEEP_LAYERS, STATS, VARIES
     global ANALYSIS, TRAIN_PAIRS, SWEEP_DETAILS, LABELLED, BORDERLINE, BORDER_LOG
+    global HSTEER_RUNS, HSTEER_TRAIN, METHODS
     ROWS = [json.loads(l) for l in DATA_FILE.read_text().splitlines() if l.strip()]
     BY_PAIR, BY_SWEEP_ALPHA, AUTO_SWEEP_LAYERS = _build_steering()
     _merge_auto_layers(BY_SWEEP_ALPHA, AUTO_SWEEP_LAYERS)
@@ -2585,6 +3281,13 @@ def _rebuild_globals():
     LABELLED = _load_jsonl(LABELLED_FILE)
     BORDERLINE = _load_jsonl(BORDERLINE_FILE)
     BORDER_LOG = BORDER_LOG_FILE.read_text() if BORDER_LOG_FILE.exists() else ""
+    HSTEER_TRAIN = _discover_train_dirs()
+    HSTEER_RUNS = _discover_eval_runs()
+    global TRAIN_DATA_SUMMARIES
+    TRAIN_DATA_SUMMARIES = {}
+    for t in HSTEER_TRAIN:
+        TRAIN_DATA_SUMMARIES[t["name"]] = _summarise_train_data(pathlib.Path(t["_paths"]["parquet"]))
+    METHODS = _build_methods_index()
 
 
 def _state_dict() -> dict:
@@ -2667,6 +3370,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
             return
 
+        if self.path.startswith("/api/methods/"):
+            try:
+                u = urlparse(self.path)
+                qs = {k: v[0] for k, v in parse_qs(u.query).items()}
+                ep = u.path[len("/api/methods/"):]
+                leaf = pathlib.Path(qs.get("leaf", ""))
+                # safety: must be inside one of our trees
+                allowed_roots = [HSTEER_AXBENCH_ROOT.resolve(), _DIFFMEAN_EVAL_ROOT.resolve()]
+                resolved = leaf.resolve()
+                if not any(str(resolved).startswith(str(p)) for p in allowed_roots):
+                    self._send_json({"error": "leaf path not in allowed roots"}, status=400); return
+                if ep == "cell":
+                    self._send_json(_read_results_examples(leaf))
+                    return
+                if ep == "example":
+                    eid = qs.get("eid", "")
+                    full = _read_results_full(leaf, eid)
+                    self._send_json(full or {})
+                    return
+                self._send_json({"error": "unknown endpoint"}, status=404)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+            return
+
         if self.path.startswith("/api/state"):
             sig = _input_signature()
             client_etag = self.headers.get("If-None-Match", "")
@@ -2708,6 +3435,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             .replace("__HSTEER_RUNS__",        json.dumps(_hsteer_runs_index_lite(), ensure_ascii=False))
             .replace("__HSTEER_TRAIN__",       json.dumps(_hsteer_train_index_lite(), ensure_ascii=False))
             .replace("__HSTEER_VARIANT_KEY__", json.dumps(HSTEER_VARIANT_KEY, ensure_ascii=False))
+            .replace("__HEADLINES__", json.dumps(HEADLINES, ensure_ascii=False))
+            .replace("__METHODS__",   json.dumps(METHODS, ensure_ascii=False))
         )
         body = page.encode()
         self.send_response(200)
