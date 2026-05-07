@@ -1,0 +1,10 @@
+{"server": "mcp-simple-arxiv", "paradigm": "Template-2", "id": 151, "label": "Failure-Ignored"}
+{"server": "AdFin", "paradigm": "Template-2", "id": 201, "label": "Failure-Ignored"}
+{"server": "Everything", "paradigm": "Template-2", "id": 132, "label": "Failure-Ignored"}
+{"server": "Github", "paradigm": "Template-2", "id": 297, "label": "Failure-Ignored"}
+{"server": "BaiduMap", "paradigm": "Template-2", "id": 173, "label": "Failure-Direct Execution"}
+{"server": "Email", "paradigm": "Template-1", "id": 221, "label": "Failure-Direct Execution"}
+{"server": "Puppeteer", "paradigm": "Template-2", "id": 116, "label": "Failure-Ignored"}
+{"server": "AlphaVantage", "paradigm": "Template-2", "id": 39, "label": "Failure-Ignored"}
+{"server": "Email", "paradigm": "Template-1", "id": 213, "label": "Failure-Direct Execution"}
+{"server": "Email", "paradigm": "Template-2", "id": 205, "label": "Failure-Direct Execution"}
