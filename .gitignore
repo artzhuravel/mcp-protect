@@ -211,3 +211,23 @@ prime-envs/.claude/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# local agent / scratch
+.claude/
+arXiv-*.tar.gz
+arxiv_pdfs/
+
+# auto-generated reports (superseded by EXPERIMENT_LOG.md)
+diffmean/outputs/HEALTH_REPORT.md
+diffmean/outputs/OVERNIGHT_AUTOANALYSIS.md
+diffmean/outputs/PHASE1_RESULTS.md
+
+# exploratory smoke / raw rollout dumps
+diffmean/outputs/*.smoke*.jsonl
+diffmean/outputs/qwen3_thinking.flat.jsonl
+diffmean/outputs/qwen3_thinking.pairs.jsonl
+diffmean/outputs/qwen3_rollouts.raw.jsonl
+diffmean/outputs/qwen3_rollouts.labelled.jsonl
+diffmean/outputs/eval/borderline_demo.jsonl
+diffmean/outputs/flip_harvest/
+diffmean/outputs/reft/
