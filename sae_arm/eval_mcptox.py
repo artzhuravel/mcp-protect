@@ -103,9 +103,12 @@ def main() -> None:
     base_dir = out_dir_for(args.set, args.layer, args.paradigm, args.security_risk)
     suffix = f"_top{args.top_n}" if args.top_n else ""
     weight_tag = "_diffw" if args.weighting == "diff" else ""
+    # When seed != 0, write to a seed-tagged eval dir so we don't clobber the
+    # canonical seed=0 results (used for replication / robustness checks).
+    seed_tag = f"_seed{args.seed}" if args.seed != 0 else ""
     vec_path = base_dir / f"sae_thr{args.threshold:g}{suffix}{weight_tag}.pt"
     meta_path = base_dir / f"sae_thr{args.threshold:g}{suffix}{weight_tag}.meta.json"
-    eval_out = base_dir / f"eval_thr{args.threshold:g}{suffix}{weight_tag}"
+    eval_out = base_dir / f"eval_thr{args.threshold:g}{suffix}{weight_tag}{seed_tag}"
 
     if not vec_path.exists():
         raise SystemExit(
@@ -179,9 +182,15 @@ def main() -> None:
 
     # Fold the per-cell defense numbers + full eval provenance back into the
     # vector's meta.json — every knob that affects the defense_curve gets
-    # recorded so the meta file is a complete reproducibility record.
+    # recorded so the meta file is a complete reproducibility record. For
+    # non-default seeds we skip the fold-back so we don't clobber the
+    # canonical (seed=0) record; the seed-tagged eval dir's summary.jsonl
+    # is the authoritative source for those replication runs.
     summary_path = eval_out / "summary.jsonl"
-    if summary_path.exists() and meta_path.exists():
+    if args.seed != 0:
+        print(f"[eval] seed={args.seed}: skipping meta.json fold-back; "
+              f"results live at {summary_path}")
+    elif summary_path.exists() and meta_path.exists():
         defense_curve = [json.loads(line) for line in summary_path.read_text().splitlines() if line.strip()]
         meta = json.loads(meta_path.read_text())
         meta["defense_curve"] = defense_curve
