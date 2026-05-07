@@ -8,7 +8,7 @@
 #   3. L32 v1 T2 thr=0  diff   — final-layer (new data point)
 #   4. L20 v1 T2 thr=0.05 diff — paper-critical L20 rescue (filter+magnitude)
 #
-# Total ~2.5h at batch=48. Continues past per-cell failures.
+# Total ~3h at batch=32. Continues past per-cell failures.
 #
 # Usage:
 #   nohup bash sae_arm/run_layer_extension.sh > sae_arm/run_logs/layer_ext.log 2>&1 & disown
@@ -56,7 +56,7 @@ run_cell() {
     && python sae_arm/eval_mcptox.py \
         --set qwen3-thinking-decision --layer "$LAYER" --paradigm Template-2 \
         --threshold "$THRESHOLD" --weighting diff \
-        --batch-size 48 --judge-concurrency 32 \
+        --batch-size 32 --judge-concurrency 32 \
         > "$LOG_DIR/${NAME}.eval.log" 2>&1 \
     && echo "  [$NAME] OK" || echo "  [$NAME] FAIL — see $LOG_DIR/${NAME}.*.log"
 }
