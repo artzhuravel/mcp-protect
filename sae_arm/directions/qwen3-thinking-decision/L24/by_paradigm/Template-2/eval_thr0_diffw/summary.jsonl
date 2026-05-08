@@ -1,0 +1,7 @@
+{"alpha": -15.0, "mode": "all", "defense": 0.56, "n": 50, "n_rows_in": 50, "n_judge_errors": 0, "gen_s": 661.3741834163666, "judge_s": 8.0111403465271}
+{"alpha": -10.0, "mode": "all", "defense": 0.56, "n": 50, "n_rows_in": 50, "n_judge_errors": 0, "gen_s": 660.9780275821686, "judge_s": 8.281081438064575}
+{"alpha": -5.0, "mode": "all", "defense": 0.54, "n": 50, "n_rows_in": 50, "n_judge_errors": 0, "gen_s": 661.0212268829346, "judge_s": 7.105899095535278}
+{"alpha": 0.0, "mode": "all", "defense": 0.58, "n": 50, "n_rows_in": 50, "n_judge_errors": 0, "gen_s": 635.569902420044, "judge_s": 5.913374662399292}
+{"alpha": 5.0, "mode": "all", "defense": 0.7, "n": 50, "n_rows_in": 50, "n_judge_errors": 0, "gen_s": 587.9192800521851, "judge_s": 13.280460119247437}
+{"alpha": 10.0, "mode": "all", "defense": 0.68, "n": 50, "n_rows_in": 50, "n_judge_errors": 0, "gen_s": 585.0605511665344, "judge_s": 6.837784051895142}
+{"alpha": 15.0, "mode": "all", "defense": 0.68, "n": 50, "n_rows_in": 50, "n_judge_errors": 0, "gen_s": 648.5445251464844, "judge_s": 5.2637553215026855}
