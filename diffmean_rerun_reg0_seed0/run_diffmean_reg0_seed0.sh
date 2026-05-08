@@ -81,7 +81,7 @@ run_cell() {
         --vec "$VEC" \
         --layer "$LAYER" \
         --paradigm "$PARADIGM" \
-        --alphas "-15,-10,-5,0,5,10,15" \
+        --alphas=-15,-10,-5,0,5,10,15 \
         --modes all \
         --num-examples 50 \
         --seed 0 \
