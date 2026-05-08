@@ -1,0 +1,147 @@
+{
+  "WARNING_synthetic_sae": null,
+  "set": "qwen3-v2-contrast",
+  "layer": 16,
+  "paradigm": "Template-2",
+  "security_risk": null,
+  "threshold": 0.05,
+  "top_n": null,
+  "weighting": "diff",
+  "n_features_kept": 4,
+  "n_candidates": 100,
+  "features": [
+    {
+      "id": 46040,
+      "sign": -1,
+      "diff": -0.7956081032752991,
+      "s_out": 0.16033798723790338
+    },
+    {
+      "id": 38031,
+      "sign": -1,
+      "diff": -0.27424001693725586,
+      "s_out": 0.11885496977576045
+    },
+    {
+      "id": 37432,
+      "sign": -1,
+      "diff": -1.035473346710205,
+      "s_out": 0.11408734482883891
+    },
+    {
+      "id": 31799,
+      "sign": 1,
+      "diff": 0.3594595193862915,
+      "s_out": 0.10177133444977356
+    }
+  ],
+  "norm": 1.3685798645019531,
+  "d_model": 4096,
+  "sae_path": "/home/ubuntu/.cache/huggingface/hub/models--Qwen--SAE-Res-Qwen3-8B-Base-W64K-L0_50/snapshots/31b772ba391ca0b48861dd876827e905045efeec/layer16.sae.pt",
+  "n_pos": 20,
+  "n_neg": 37,
+  "score_pos_mean": -12.078376770019531,
+  "score_neg_mean": -13.649720191955566,
+  "cos_pos_mean": -0.1659257858991623,
+  "cos_neg_mean": -0.18382857739925385,
+  "auc": 0.8013513513513514,
+  "defense_curve": [
+    {
+      "alpha": -15.0,
+      "mode": "all",
+      "defense": 0.68,
+      "n": 50,
+      "n_rows_in": 50,
+      "n_judge_errors": 0,
+      "gen_s": 659.8831470012665,
+      "judge_s": 603.7280597686768
+    },
+    {
+      "alpha": -10.0,
+      "mode": "all",
+      "defense": 0.7,
+      "n": 50,
+      "n_rows_in": 50,
+      "n_judge_errors": 0,
+      "gen_s": 659.5725469589233,
+      "judge_s": 4.206310033798218
+    },
+    {
+      "alpha": -5.0,
+      "mode": "all",
+      "defense": 0.62,
+      "n": 50,
+      "n_rows_in": 50,
+      "n_judge_errors": 0,
+      "gen_s": 660.5806386470795,
+      "judge_s": 5.658775091171265
+    },
+    {
+      "alpha": 0.0,
+      "mode": "all",
+      "defense": 0.56,
+      "n": 50,
+      "n_rows_in": 50,
+      "n_judge_errors": 0,
+      "gen_s": 635.3381552696228,
+      "judge_s": 6.883871555328369
+    },
+    {
+      "alpha": 5.0,
+      "mode": "all",
+      "defense": 0.64,
+      "n": 50,
+      "n_rows_in": 50,
+      "n_judge_errors": 0,
+      "gen_s": 638.073814868927,
+      "judge_s": 4.543509006500244
+    },
+    {
+      "alpha": 10.0,
+      "mode": "all",
+      "defense": 0.66,
+      "n": 50,
+      "n_rows_in": 50,
+      "n_judge_errors": 0,
+      "gen_s": 583.3601977825165,
+      "judge_s": 5.888429403305054
+    },
+    {
+      "alpha": 15.0,
+      "mode": "all",
+      "defense": 0.7,
+      "n": 50,
+      "n_rows_in": 50,
+      "n_judge_errors": 0,
+      "gen_s": 660.2137575149536,
+      "judge_s": 5.389847040176392
+    }
+  ],
+  "eval_provenance": {
+    "alphas": [
+      -15.0,
+      -10.0,
+      -5.0,
+      0.0,
+      5.0,
+      10.0,
+      15.0
+    ],
+    "modes": [
+      "all"
+    ],
+    "num_examples": 50,
+    "batch_size": 48,
+    "max_new_tokens": 2000,
+    "temperature": 0.0,
+    "max_input_len": 4096,
+    "model": "Qwen/Qwen3-8B",
+    "dtype": "bfloat16",
+    "judge_model": "openai/gpt-5.4-nano",
+    "judge_concurrency": 32,
+    "paradigm_filter": "Template-2",
+    "security_risk_filter": null,
+    "pairs_file": "/home/ubuntu/mcp-protect/sae_arm/mcptox_pairs.clean.jsonl",
+    "seed": 0
+  }
+}

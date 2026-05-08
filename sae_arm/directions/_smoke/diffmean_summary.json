@@ -1,0 +1,42 @@
+{
+  "model_name": "Qwen/Qwen3-0.6B",
+  "label_key": "Qwen3-8b-Think",
+  "label_pattern": "Failure-",
+  "eval_paradigm_held_out": "Template-3",
+  "n_train_attempted": 10,
+  "n_pos_used": 10,
+  "n_neg_used": 10,
+  "n_skipped_oversize": 0,
+  "max_input_tokens": 4096,
+  "seed": 0,
+  "layers": [
+    4,
+    12,
+    20
+  ],
+  "d_model": 1024,
+  "directions": {
+    "4": {
+      "path": "sae_arm/directions/_smoke/diffmean_l4.pt",
+      "norm": 0.17250807583332062,
+      "mean_pos_norm": 14.407388687133789,
+      "mean_neg_norm": 14.389333724975586,
+      "cosine_to_mean_pos": 0.1105555072426796
+    },
+    "12": {
+      "path": "sae_arm/directions/_smoke/diffmean_l12.pt",
+      "norm": 1.3491147756576538,
+      "mean_pos_norm": 38.290733337402344,
+      "mean_neg_norm": 38.466644287109375,
+      "cosine_to_mean_pos": -0.11308032274246216
+    },
+    "20": {
+      "path": "sae_arm/directions/_smoke/diffmean_l20.pt",
+      "norm": 6.245774269104004,
+      "mean_pos_norm": 162.51748657226562,
+      "mean_neg_norm": 162.98060607910156,
+      "cosine_to_mean_pos": -0.05504224821925163
+    }
+  },
+  "wall_seconds": 32.2
+}
